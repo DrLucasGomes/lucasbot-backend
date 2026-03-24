@@ -4,7 +4,7 @@ import requests
 app = FastAPI()
 
 # --- DADOS DO SEU SUPABASE ---
-SUPABASE_URL = "https://gwxcnezuwfrswhkzflaw.supabase.co"
+SUPABASE_URL = "https://gwxcnzuwfrswhkzflaw.supabase.co"
 SUPABASE_KEY = "sb_publishable_62LT85LC41akfZME_t6sPg_7hSS8CJ2" # Use a sua anon key completa aqui
 # -----------------------------
 
