@@ -1,32 +1,35 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 import requests
-import os
 
 app = FastAPI()
 
-# --- DADOS DO SEU SUPABASE ---
-# Verifique se o link termina com .co (sem barra no final)
+# --- DADOS QUE VOCÊ JÁ CONFERIU MIL VEZES ---
 URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
-# Cole a chave ANON inteira entre as aspas abaixo
-KEY = "sb_publishable_62LT85LC41akfZME_t6sPg_7hSS8CJ2" 
-# -----------------------------
+KEY = "sb_secret_2uwKMoi6Z3mN1mFU1cOKqA_Unq-q5d8" # A chave secreta (service_role), não a anon!
 
 @app.get("/")
-def home():
-    return {"status": "Doutor, o servidor está ONLINE!"}
+def testar_conexao():
+    # Tenta inserir um dado de teste direto
+    endpoint = f"{URL}/rest/v1/leads_vigor"
+    headers = {
+        "apikey": KEY,
+        "Authorization": f"Bearer {KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    payload = {"nome": "TESTE_DO_DOUTOR", "email": "teste@doutor.com"}
+    
+    try:
+        r = requests.post(endpoint, json=payload, headers=headers)
+        return {
+            "status_code": r.status_code,
+            "resposta_do_supabase": r.text,
+            "url_usada": endpoint
+        }
+    except Exception as e:
+        return {"erro_fatal": str(e)}
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    try:
-        dados = await request.json()
-        headers = {
-            "apikey": KEY,
-            "Authorization": f"Bearer {KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
-        # Envia para a tabela leads_vigor
-        res = requests.post(f"{URL}/rest/v1/leads_vigor", json=dados, headers=headers)
-        return {"status": "sucesso", "supabase_code": res.status_code}
-    except Exception as e:
-        return {"status": "erro", "detalhe": str(e)}
+    # (Mantemos o webhook aqui para depois)
+    return {"status": "ok"}
