@@ -1,12 +1,21 @@
+from fastapi import FastAPI, Request
+import requests
+
+# 1. Declaramos o app primeiro
+app = FastAPI()
+
+# 2. Suas configurações
+URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
+KEY = "sb_secret_2uwKMoi6Z3mN1mFU1cOKqA_Unq-q5d8" 
+
+# 3. Definimos a rota de recebimento
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         dados = await request.json()
         
-        # Garanta que o 'whatsapp_id' está definido. 
-        # Muitas vezes o ManyChat chama isso de 'id' ou 'user_id' no JSON.
-        # Ajuste a linha abaixo se o nome do campo for diferente:
-        whatsapp_id = dados.get("whatsapp_id") or dados.get("id")
+        # Tentamos pegar o ID do usuário de diferentes formas que o ManyChat envia
+        whatsapp_id = dados.get("whatsapp_id") or dados.get("id") or dados.get("user_id")
         
         if not whatsapp_id:
             return {"status": "erro", "detalhe": "ID do WhatsApp não encontrado"}
@@ -18,11 +27,7 @@ async def webhook(request: Request):
             "Prefer": "resolution=merge-duplicates" 
         }
         
-        # O pulo do gato: Enviamos os dados para a tabela.
-        # Como o "Prefer: resolution=merge-duplicates" está no header,
-        # e o seu "whatsapp_id" é a Primary Key, o Supabase vai 
-        # atualizar a linha existente em vez de criar uma nova linha NULL.
-        
+        # Enviamos para a tabela leads_vigor
         response = requests.post(f"{URL}/rest/v1/leads_vigor", json=dados, headers=headers)
         
         if response.status_code >= 400:
@@ -32,3 +37,8 @@ async def webhook(request: Request):
         
     except Exception as e:
         return {"status": "erro_script", "detalhe": str(e)}
+
+# 4. Rota de teste para ver se o bot está online
+@app.get("/")
+def home():
+    return "LUCASBOT V3 - ONLINE"
