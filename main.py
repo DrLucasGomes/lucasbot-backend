@@ -14,11 +14,15 @@ async def webhook(request: Request):
     try:
         dados = await request.json()
         
-        # Tentamos pegar o ID do usuário de diferentes formas que o ManyChat envia
-        whatsapp_id = dados.get("whatsapp_id") or dados.get("id") or dados.get("user_id")
+        # Garante que o ID existe no pacote. 
+        # Se o ManyChat enviar 'user_id', nós salvamos como 'id'
+        if "user_id" in dados:
+            dados["id"] = dados.pop("user_id")
         
-        if not whatsapp_id:
-            return {"status": "erro", "detalhe": "ID do WhatsApp não encontrado"}
+        # Se não tiver um 'id' no JSON, o Supabase não tem como fazer o merge.
+        # Isso é o que causa as suas linhas NULL.
+        if "id" not in dados:
+            return {"status": "erro", "detalhe": "ID do lead não encontrado no webhook. O Supabase não pode atualizar sem um ID."}
         
         headers = {
             "apikey": KEY, 
@@ -38,7 +42,7 @@ async def webhook(request: Request):
     except Exception as e:
         return {"status": "erro_script", "detalhe": str(e)}
 
-# 4. Rota de teste para ver se o bot está online
+# 4. Rota de teste
 @app.get("/")
 def home():
-    return "LUCASBOT V3 - ONLINE"
+    return "LUCASBOT V3 - ONLINE E OPERANTE"
