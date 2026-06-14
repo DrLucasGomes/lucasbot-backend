@@ -1,30 +1,30 @@
-from fastapi import FastAPI, Request
-import requests
-
-app = FastAPI()
-
-# Configurações do Supabase (Mantenha as suas)
-URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
-KEY = "sb_secret_2uwKMoi6Z3mN1mFU1cOKqA_Unq-q5d8" 
-
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         dados = await request.json()
         
-        # O SEGREDO ESTÁ AQUI: "resolution=merge-duplicates"
-        # Isso diz ao Supabase: "Se o ID já existe, apenas atualize os dados"
+        # Garanta que o 'whatsapp_id' está definido. 
+        # Muitas vezes o ManyChat chama isso de 'id' ou 'user_id' no JSON.
+        # Ajuste a linha abaixo se o nome do campo for diferente:
+        whatsapp_id = dados.get("whatsapp_id") or dados.get("id")
+        
+        if not whatsapp_id:
+            return {"status": "erro", "detalhe": "ID do WhatsApp não encontrado"}
+        
         headers = {
             "apikey": KEY, 
             "Authorization": f"Bearer {KEY}", 
             "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates"
+            "Prefer": "resolution=merge-duplicates" 
         }
         
-        # Envia para o Supabase
+        # O pulo do gato: Enviamos os dados para a tabela.
+        # Como o "Prefer: resolution=merge-duplicates" está no header,
+        # e o seu "whatsapp_id" é a Primary Key, o Supabase vai 
+        # atualizar a linha existente em vez de criar uma nova linha NULL.
+        
         response = requests.post(f"{URL}/rest/v1/leads_vigor", json=dados, headers=headers)
         
-        # Se o banco de dados reclamar, pegamos o detalhe
         if response.status_code >= 400:
             return {"status": "erro_banco", "detalhe": response.text}
 
@@ -32,7 +32,3 @@ async def webhook(request: Request):
         
     except Exception as e:
         return {"status": "erro_script", "detalhe": str(e)}
-
-@app.get("/")
-def home():
-    return "LUCASBOT V3 - ONLINE"
