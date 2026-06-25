@@ -1,11 +1,13 @@
 from fastapi import FastAPI, Request
 import requests
+import os
 
 app = FastAPI()
 
-# Suas configurações
+# URL do seu projeto Supabase
 URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
-KEY = "sb_secret_2uwKMoi6Z3mN1mFU1cOKqA_Unq-q5d8" 
+# Puxando a chave com segurança do Render
+KEY = os.getenv("SUPABASE_KEY") 
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -19,8 +21,12 @@ async def webhook(request: Request):
             "Prefer": "resolution=merge-duplicates" 
         }
         
-        # Envio direto para o banco
-        response = requests.post(f"{URL}/rest/v1/leads_vigor", json=dados, headers=headers)
+        # O segredo está no '?on_conflict=manychat_id' no final da URL
+        response = requests.post(
+            f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", 
+            json=dados, 
+            headers=headers
+        )
         
         return {"status": "sucesso", "code": response.status_code}
     except Exception as e:
@@ -28,4 +34,4 @@ async def webhook(request: Request):
 
 @app.get("/")
 def home():
-    return "LUCASBOT V3 - ONLINE"
+    return "LUCASBOT V3 - ONLINE E BLINDADO"
