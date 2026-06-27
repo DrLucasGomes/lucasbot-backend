@@ -7,7 +7,7 @@ app = FastAPI()
 URL_SUPABASE = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY_SUPABASE = os.getenv("SUPABASE_KEY") 
 
-# COLA O SEU TOKEN DA API PÚBLICA QUE FUNCIONOU BEM AQUI DENTRO
+# MANTER O SEU TOKEN DA API PÚBLICA AQUI DENTRO
 MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
 
 headers_supabase = {
@@ -43,7 +43,6 @@ async def webhook_kiwify(request: Request):
         customer = dados_kiwify.get("Customer", {})
         email = customer.get("email")
         
-        # Tenta pegar o ID se ele vier perdido em alguma variável customizada
         custom_variables = dados_kiwify.get("custom_variables", {})
         manychat_user_id = custom_variables.get("manychat_id")
         
@@ -52,6 +51,7 @@ async def webhook_kiwify(request: Request):
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
         try:
+            # VOLTOU PARA O SINGULAR: "produto"
             payload_supabase = {
                 "nome": customer.get("name"),
                 "email": email,
@@ -69,16 +69,14 @@ async def webhook_kiwify(request: Request):
             print(f"Erro banco: {str(err_banco)}")
 
         if status == "approved":
-            # SE TIVERMOS O ID DIRETO, CORRE PARA APLICAÇÃO BRUTA DA TAG
             if manychat_user_id:
                 tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                 payload_tag = {"subscriber_id": int(manychat_user_id), "tag_name": "comprou-vigor360"}
                 res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
                 return {"status": "sucesso_id_direto", "manychat_code": res_tag.status_code}
 
-            # SE NÃO TIVER ID, FAZ O COMBINADO PLANO B (EMAIL OU TELEFONE)
             payload_busca = {"field_name": "email", "field_value": email}
-            find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=payload_busca, headers=headers_manychat)
+            find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=headers_manychat)
             subscriber_data = find_res.json().get("data", [])
 
             if not subscriber_data and telefone:
@@ -100,19 +98,35 @@ async def webhook_kiwify(request: Request):
     except Exception as e:
         return {"status": "erro_critico", "detalhe": str(e)}
 
-# ROTA RECONFIGURADA PARA ACEITAR TESTE DIRETO POR ID (VIA NAVEGADOR)
+# ROTA DE SIMULAÇÃO AJUSTADA COM "produto" NO SINGULAR
+@app.get("/testar-kiwify-completo")
+def testar_kiwify_completo(email: str, status: str, produto: str):
+    try:
+        payload_supabase = {
+            "email": email,
+            "status_pagamento": status,
+            "produto": produto
+        }
+        res_supabase = requests.post(
+            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=email", 
+            json=payload_supabase, 
+            headers=headers_supabase
+        )
+        return {
+            "status": "Simulacao Enviada!", 
+            "supabase_code": res_supabase.status_code, 
+            "detalhe": "Verifique a sua tabela leads_vigor agora!"
+        }
+    except Exception as e:
+        return {"status": "Erro", "detalhe": str(e)}
+
 @app.get("/testar-id")
 def testar_id(id_user: int):
     try:
         tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
         payload_tag = { "subscriber_id": id_user, "tag_name": "comprou-vigor360" }
         res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
-        return {
-            "status": "Comando Enviado!", 
-            "manychat_code": res_tag.status_code, 
-            "mensagem": f"Tag disparada direto para o ID {id_user}", 
-            "resposta_manychat": res_tag.json()
-        }
+        return {"status": "Comando Enviado!", "manychat_code": res_tag.status_code, "resposta_manychat": res_tag.json()}
     except Exception as e:
         return {"status": "Erro", "detalhe": str(e)}
 
