@@ -20,12 +20,13 @@ headers_manychat = {
     "Content-Type": "application/json"
 }
 
+# 1. ROTA DO MANYCHAT (MANTÉM O FLUXO DINÂMICO DE ANTES)
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         dados = await request.json()
         response = requests.post(
-            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id", 
+            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=email", 
             json=dados, 
             headers=headers_supabase
         )
@@ -33,6 +34,7 @@ async def webhook(request: Request):
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
+# 2. ROTA DA KIWIFY - ATUALIZA A MESMA LINHA POR E-MAIL E ACIONA O FUNIL
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
@@ -45,7 +47,7 @@ async def webhook_kiwify(request: Request):
         if telefone:
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
-        # Tentativa de gravar no Supabase (em bloco isolado para não quebrar o fluxo)
+        # Grava ou atualiza a linha do paciente usando o E-MAIL como identificador
         try:
             payload_supabase = {
                 "nome": customer.get("name"),
@@ -55,17 +57,16 @@ async def webhook_kiwify(request: Request):
                 "produto": dados_kiwify.get("product_name")
             }
             res_supabase = requests.post(
-                f"{URL_SUPABASE}/rest/v1/leads_vigor", 
+                f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=email", 
                 json=payload_supabase, 
                 headers=headers_supabase
             )
-            print(f"SUPABASE STATUS LOG: {res_supabase.status_code}")
+            print(f"SUPABASE STATUS LOG: {res_supabase.status_code} | RESPOSTA: {res_supabase.text}")
         except Exception as err_banco:
-            print(f"Erro ao salvar no banco (ignorado para salvar o funil): {str(err_banco)}")
+            print(f"Erro banco: {str(err_banco)}")
 
-        # CONTROLAR O FUNIL DO WHATSAPP (FOCO TOTAL NO CTR BRUTO)
+        # CONTROLE DO WHATSAPP
         if status == "approved":
-            # Busca o ID de usuário do ManyChat associado a esse e-mail
             busca_url = f"https://api.manychat.com/fb/subscriber/findByCustomField?field_name=email&field_value={email}"
             find_res = requests.get(busca_url, headers=headers_manychat)
             
@@ -74,7 +75,6 @@ async def webhook_kiwify(request: Request):
                 if subscriber_data:
                     manychat_user_id = subscriber_data[0].get("id")
                     
-                    # Força a tag entrar direto no perfil do cara
                     tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                     payload_tag = {
                         "subscriber_id": manychat_user_id,
@@ -85,10 +85,10 @@ async def webhook_kiwify(request: Request):
                     print(f"MANYCHAT TAG STATUS: {res_tag.status_code}")
                     return {"status": "sucesso_funil", "manychat_code": res_tag.status_code}
             
-            print(f"E-mail {email} nao foi localizado em nenhuma ficha do ManyChat.")
-            return {"status": "erro_localizacao_manychat"}
+            print(f"Comprador {email} nao localizado no ManyChat.")
+            return {"status": "comprador_nao_no_manychat"}
             
-        return {"status": "status_nao_aprovado", "status_recebido": status}
+        return {"status": "fim_processamento_status", "status": status}
         
     except Exception as e:
         print(f"Erro Geral: {str(e)}")
