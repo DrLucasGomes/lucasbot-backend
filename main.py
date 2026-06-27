@@ -4,7 +4,6 @@ import os
 
 app = FastAPI()
 
-# Configurações das Chaves (Puxadas com segurança do Render)
 URL_SUPABASE = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY_SUPABASE = os.getenv("SUPABASE_KEY") 
 MANYCHAT_TOKEN = os.getenv("MANYCHAT_TOKEN")
@@ -13,7 +12,7 @@ headers_supabase = {
     "apikey": KEY_SUPABASE, 
     "Authorization": f"Bearer {KEY_SUPABASE}", 
     "Content-Type": "application/json",
-    "Prefer": "resolution=merge-duplicates" # Atualiza a linha do paciente sem duplicar
+    "Prefer": "resolution=merge-duplicates"
 }
 
 headers_manychat = {
@@ -21,7 +20,6 @@ headers_manychat = {
     "Content-Type": "application/json"
 }
 
-# 1. ROTA EXISTENTE DO MANYCHAT
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -35,7 +33,6 @@ async def webhook(request: Request):
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
-# 2. ROTA DA KIWIFY - ATUALIZA O BANCO COMPLETO E COMANDA O MANYCHAT
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
@@ -44,35 +41,31 @@ async def webhook_kiwify(request: Request):
         customer = dados_kiwify.get("Customer", {})
         email = customer.get("email")
         
-        # Limpa o telefone para deixar apenas números
         telefone = customer.get("mobile", "")
         if telefone:
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
-        # ------------------------------------------------------------
-        # PASSO 1: ATUALIZA O PACIENTE NO SUPABASE COM OS DADOS DE VENDA
-        # ------------------------------------------------------------
-        payload_supabase = {
-            "nome": customer.get("name"),
-            "email": email,
-            "telefone": telefone,
-            "status_pagamento": status,
-            "produto": dados_kiwify.get("product_name"),
-            "manychat_id": str(dados_kiwify.get("order_id"))
-        }
-        
-        # Faz o Upsert na tabela mantendo o histórico dinâmico do paciente
-        res_supabase = requests.post(
-            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id", 
-            json=payload_supabase, 
-            headers=headers_supabase
-        )
-        print(f"SUPABASE LOG - Status: {res_supabase.status_code}")
+        # Tentativa de gravar no Supabase (em bloco isolado para não quebrar o fluxo)
+        try:
+            payload_supabase = {
+                "nome": customer.get("name"),
+                "email": email,
+                "telefone": telefone,
+                "status_pagamento": status,
+                "produto": dados_kiwify.get("product_name")
+            }
+            res_supabase = requests.post(
+                f"{URL_SUPABASE}/rest/v1/leads_vigor", 
+                json=payload_supabase, 
+                headers=headers_supabase
+            )
+            print(f"SUPABASE STATUS LOG: {res_supabase.status_code}")
+        except Exception as err_banco:
+            print(f"Erro ao salvar no banco (ignorado para salvar o funil): {str(err_banco)}")
 
-        # ------------------------------------------------------------
-        # PASSO 2: APLICA A TAG NO MANYCHAT SE FOR COMPRA APROVADA
-        # ------------------------------------------------------------
+        # CONTROLAR O FUNIL DO WHATSAPP (FOCO TOTAL NO CTR BRUTO)
         if status == "approved":
+            # Busca o ID de usuário do ManyChat associado a esse e-mail
             busca_url = f"https://api.manychat.com/fb/subscriber/findByCustomField?field_name=email&field_value={email}"
             find_res = requests.get(busca_url, headers=headers_manychat)
             
@@ -81,7 +74,7 @@ async def webhook_kiwify(request: Request):
                 if subscriber_data:
                     manychat_user_id = subscriber_data[0].get("id")
                     
-                    # Carimba a tag para salvar o cara do áudio de cobrança de 2h
+                    # Força a tag entrar direto no perfil do cara
                     tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                     payload_tag = {
                         "subscriber_id": manychat_user_id,
@@ -89,20 +82,18 @@ async def webhook_kiwify(request: Request):
                     }
                     
                     res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
-                    print(f"MANYCHAT LOG - Tag aplicada para: {email} | Status: {res_tag.status_code}")
-                    
-                    return {"status": "sucesso", "supabase": res_supabase.status_code, "manychat": "tag_aplicada"}
+                    print(f"MANYCHAT TAG STATUS: {res_tag.status_code}")
+                    return {"status": "sucesso_funil", "manychat_code": res_tag.status_code}
             
-            print(f"Comprador {email} atualizado no banco, mas não localizado no ManyChat.")
-            return {"status": "sucesso_parcial", "supabase": res_supabase.status_code, "manychat": "nao_encontrado"}
+            print(f"E-mail {email} nao foi localizado em nenhuma ficha do ManyChat.")
+            return {"status": "erro_localizacao_manychat"}
             
-        return {"status": "sucesso_supabase", "supabase": res_supabase.status_code, "manychat": "ignorado_status"}
+        return {"status": "status_nao_aprovado", "status_recebido": status}
         
     except Exception as e:
-        print(f"Erro crítico: {str(e)}")
-        return {"status": "erro", "detalhe": str(e)}
+        print(f"Erro Geral: {str(e)}")
+        return {"status": "erro_critico", "detalhe": str(e)}
 
-# 3. HOME
 @app.get("/")
 def home():
     return "LUCASBOT V3 - ONLINE E BLINDADO"
