@@ -20,7 +20,6 @@ headers_manychat = {
     "Content-Type": "application/json"
 }
 
-# 1. ROTA DO MANYCHAT (MANTÉM O FLUXO DINÂMICO DE ANTES)
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -34,7 +33,6 @@ async def webhook(request: Request):
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
-# 2. ROTA DA KIWIFY - ATUALIZA A MESMA LINHA POR E-MAIL E ACIONA O FUNIL
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
@@ -47,7 +45,6 @@ async def webhook_kiwify(request: Request):
         if telefone:
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
-        # Grava ou atualiza a linha do paciente usando o E-MAIL como identificador
         try:
             payload_supabase = {
                 "nome": customer.get("name"),
@@ -61,11 +58,10 @@ async def webhook_kiwify(request: Request):
                 json=payload_supabase, 
                 headers=headers_supabase
             )
-            print(f"SUPABASE STATUS LOG: {res_supabase.status_code} | RESPOSTA: {res_supabase.text}")
+            print(f"SUPABASE STATUS LOG: {res_supabase.status_code}")
         except Exception as err_banco:
             print(f"Erro banco: {str(err_banco)}")
 
-        # CONTROLE DO WHATSAPP
         if status == "approved":
             busca_url = f"https://api.manychat.com/fb/subscriber/findByCustomField?field_name=email&field_value={email}"
             find_res = requests.get(busca_url, headers=headers_manychat)
@@ -82,17 +78,33 @@ async def webhook_kiwify(request: Request):
                     }
                     
                     res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
-                    print(f"MANYCHAT TAG STATUS: {res_tag.status_code}")
                     return {"status": "sucesso_funil", "manychat_code": res_tag.status_code}
-            
-            print(f"Comprador {email} nao localizado no ManyChat.")
             return {"status": "comprador_nao_no_manychat"}
-            
         return {"status": "fim_processamento_status", "status": status}
-        
     except Exception as e:
-        print(f"Erro Geral: {str(e)}")
         return {"status": "erro_critico", "detalhe": str(e)}
+
+# ROTA SECRETA PARA VOCÊ TESTAR DE GRAÇA PELO NAVEGADOR
+@app.get("/testar-funil")
+def testar_funil(email: str):
+    try:
+        busca_url = f"https://api.manychat.com/fb/subscriber/findByCustomField?field_name=email&field_value={email}"
+        find_res = requests.get(busca_url, headers=headers_manychat)
+        
+        if find_res.status_code == 200:
+            subscriber_data = find_res.json().get("data", [])
+            if subscriber_data:
+                manychat_user_id = subscriber_data[0].get("id")
+                
+                tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
+                payload_tag = { "subscriber_id": manychat_user_id, "tag_name": "comprou-vigor360" }
+                res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
+                
+                return {"status": "Sucesso!", "mensagem": f"Tag comprou-vigor360 injetada no e-mail {email}", "manychat_code": res_tag.status_code}
+            return {"status": "Erro", "mensagem": f"O e-mail {email} nao foi encontrado dentro do seu ManyChat. Verifique a ficha do contato."}
+        return {"status": "Erro", "mensagem": "Token do ManyChat invalido ou erro na API."}
+    except Exception as e:
+        return {"status": "Erro Critico", "detalhe": str(e)}
 
 @app.get("/")
 def home():
