@@ -7,7 +7,7 @@ app = FastAPI()
 URL_SUPABASE = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY_SUPABASE = os.getenv("SUPABASE_KEY") 
 
-# TOKEN DA API PÚBLICA QUE AUTENTICOU E DEU SINAL VERDE
+# TOKEN DA API PÚBLICA DO MANYCHAT
 MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
 
 headers_supabase_padrao = {
@@ -21,7 +21,7 @@ headers_manychat = {
     "Content-Type": "application/json"
 }
 
-# ROTA DO SEU WEBHOOK ORIGINAL - SEUS CAMPOS PERSONALIZADOS ESTÃO 100% PRESERVADOS AQUI
+# ROTA DO WEBHOOK CORRIGIDA PARA NÃO SOBRESCREVER DADOS
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -30,13 +30,13 @@ async def webhook(request: Request):
         headers_webhook = {
             "apikey": KEY_SUPABASE, 
             "Authorization": f"Bearer {KEY_SUPABASE}", 
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates" 
+            "Content-Type": "application/json"
+            # Removido o "Prefer: resolution=merge-duplicates" para evitar a exclusão de dados antigos
         }
         
-        # Mantém exatamente a estrutura bruta que você já tinha configurado no ManyChat
+        # Inserção limpa: agora ele cria uma nova linha para cada entrada no fluxo, preservando o histórico
         response = requests.post(
-            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id", 
+            f"{URL_SUPABASE}/rest/v1/leads_vigor", 
             json=dados, 
             headers=headers_webhook
         )
@@ -45,7 +45,7 @@ async def webhook(request: Request):
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
-# ROTA DA KIWIFY INTEGRADA E UNIFICADA
+# ROTA DA KIWIFY
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
@@ -62,7 +62,6 @@ async def webhook_kiwify(request: Request):
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
         try:
-            # Tenta atualizar os dados da compra usando o e-mail como âncora
             payload_supabase = {
                 "nome": customer.get("name"),
                 "email": email,
@@ -70,7 +69,6 @@ async def webhook_kiwify(request: Request):
                 "status_pagamento": status,
                 "produto": dados_kiwify.get("product_name")
             }
-            # Se já existir o lead pelo ManyChat, essa inserção aqui cria ou anexa a linha da compra
             requests.post(
                 f"{URL_SUPABASE}/rest/v1/leads_vigor", 
                 json=payload_supabase, 
@@ -80,19 +78,16 @@ async def webhook_kiwify(request: Request):
             print(f"Erro banco kiwify: {str(err_banco)}")
 
         if status == "approved":
-            # 1. Se veio o ID direto da Kiwify, mete a tag na hora
             if manychat_user_id:
                 tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                 payload_tag = {"subscriber_id": int(manychat_user_id), "tag_name": "comprou-vigor360"}
                 res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
                 return {"status": "sucesso_id_direto", "manychat_code": res_tag.status_code}
 
-            # 2. Plano B: Se não veio o ID, busca por e-mail no ManyChat
             payload_busca = {"field_name": "email", "field_value": email}
             find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=payload_busca, headers=headers_manychat)
             subscriber_data = find_res.json().get("data", [])
 
-            # 3. Plano C: Se não achou por e-mail, caça pelo telefone
             if not subscriber_data and telefone:
                 find_res = requests.get(f"https://api.manychat.com/fb/subscriber/findByName?name={telefone}", headers=headers_manychat)
                 subscriber_data = find_res.json().get("data", []) if "data" in find_res.json() else [find_res.json()]
@@ -112,14 +107,13 @@ async def webhook_kiwify(request: Request):
     except Exception as e:
         return {"status": "erro_critico", "detalhe": str(e)}
 
-# ROTAS AUXILIARES DE SEGURANÇA E TESTE DE ID
 @app.get("/testar-id")
 def testar_id(id_user: int):
     try:
         tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
         payload_tag = { "subscriber_id": id_user, "tag_name": "comprou-vigor360" }
         res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
-        return {"status": "Comando Enviado!", "manychat_code": res_tag.status_code, "resposta_manychat": res_tag.json()}
+        return {"status": "Comando Enviado!", "manychat_code": res_tag.status_code}
     except Exception as e:
         return {"status": "Erro", "detalhe": str(e)}
 
