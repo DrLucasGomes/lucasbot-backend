@@ -8,7 +8,7 @@ URL_SUPABASE = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY_SUPABASE = os.getenv("SUPABASE_KEY") 
 
 # MANTENHA O SEU TOKEN REAL AQUI DENTRO
-MANYCHAT_TOKEN = "COLE_AQUI_O_SEU_TOKEN_DO_MANYCHAT"
+MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
 
 headers_supabase = {
     "apikey": KEY_SUPABASE, 
