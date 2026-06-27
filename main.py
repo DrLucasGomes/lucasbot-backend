@@ -13,8 +13,7 @@ MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
 headers_supabase = {
     "apikey": KEY_SUPABASE, 
     "Authorization": f"Bearer {KEY_SUPABASE}", 
-    "Content-Type": "application/json",
-    "Prefer": "resolution=merge-duplicates"
+    "Content-Type": "application/json"
 }
 
 headers_manychat = {
@@ -27,7 +26,7 @@ async def webhook(request: Request):
     try:
         dados = await request.json()
         response = requests.post(
-            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=email", 
+            f"{URL_SUPABASE}/rest/v1/leads_vigor", 
             json=dados, 
             headers=headers_supabase
         )
@@ -51,7 +50,6 @@ async def webhook_kiwify(request: Request):
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
         try:
-            # VOLTOU PARA O SINGULAR: "produto"
             payload_supabase = {
                 "nome": customer.get("name"),
                 "email": email,
@@ -60,7 +58,7 @@ async def webhook_kiwify(request: Request):
                 "produto": dados_kiwify.get("product_name")
             }
             res_supabase = requests.post(
-                f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=email", 
+                f"{URL_SUPABASE}/rest/v1/leads_vigor", 
                 json=payload_supabase, 
                 headers=headers_supabase
             )
@@ -76,7 +74,7 @@ async def webhook_kiwify(request: Request):
                 return {"status": "sucesso_id_direto", "manychat_code": res_tag.status_code}
 
             payload_busca = {"field_name": "email", "field_value": email}
-            find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=headers_manychat)
+            find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=payload_busca, headers=headers_manychat)
             subscriber_data = find_res.json().get("data", [])
 
             if not subscriber_data and telefone:
@@ -98,7 +96,6 @@ async def webhook_kiwify(request: Request):
     except Exception as e:
         return {"status": "erro_critico", "detalhe": str(e)}
 
-# ROTA DE SIMULAÇÃO AJUSTADA COM "produto" NO SINGULAR
 @app.get("/testar-kiwify-completo")
 def testar_kiwify_completo(email: str, status: str, produto: str):
     try:
@@ -108,13 +105,14 @@ def testar_kiwify_completo(email: str, status: str, produto: str):
             "produto": produto
         }
         res_supabase = requests.post(
-            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=email", 
+            f"{URL_SUPABASE}/rest/v1/leads_vigor", 
             json=payload_supabase, 
             headers=headers_supabase
         )
         return {
             "status": "Simulacao Enviada!", 
             "supabase_code": res_supabase.status_code, 
+            "supabase_response": res_supabase.text,
             "detalhe": "Verifique a sua tabela leads_vigor agora!"
         }
     except Exception as e:
