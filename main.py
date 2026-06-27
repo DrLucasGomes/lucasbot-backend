@@ -21,7 +21,7 @@ headers_manychat = {
     "Content-Type": "application/json"
 }
 
-# ROTA DO WEBHOOK CORRIGIDA PARA NÃO SOBRESCREVER DADOS
+# ROTA WEBHOOK CORRIGIDA: VOLTA O ON_CONFLICT EXIGIDO PELO SEU BANCO, MAS COM TRAVA DE MERGE
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -30,13 +30,13 @@ async def webhook(request: Request):
         headers_webhook = {
             "apikey": KEY_SUPABASE, 
             "Authorization": f"Bearer {KEY_SUPABASE}", 
-            "Content-Type": "application/json"
-            # Removido o "Prefer: resolution=merge-duplicates" para evitar a exclusão de dados antigos
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates"  # Força o Supabase a apenas somar os dados, sem apagar as colunas antigas
         }
         
-        # Inserção limpa: agora ele cria uma nova linha para cada entrada no fluxo, preservando o histórico
+        # Voltou o on_conflict que o seu banco exige para não dar erro de ID duplicado
         response = requests.post(
-            f"{URL_SUPABASE}/rest/v1/leads_vigor", 
+            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id", 
             json=dados, 
             headers=headers_webhook
         )
