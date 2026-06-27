@@ -6,7 +6,7 @@ app = FastAPI()
 
 URL_SUPABASE = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY_SUPABASE = os.getenv("SUPABASE_KEY") 
-MANYCHAT_TOKEN = MANYCHAT_TOKEN = "9730296:e2bbef5228e99eaf17446f519aaa9ca9"
+MANYCHAT_TOKEN = os.getenv("MANYCHAT_TOKEN")
 
 headers_supabase = {
     "apikey": KEY_SUPABASE, 
@@ -41,6 +41,10 @@ async def webhook_kiwify(request: Request):
         customer = dados_kiwify.get("Customer", {})
         email = customer.get("email")
         
+        # Pega as variáveis customizadas enviadas no link da Kiwify
+        custom_variables = dados_kiwify.get("custom_variables", {})
+        manychat_user_id = custom_variables.get("manychat_id") # O ID vem aqui agora!
+        
         telefone = customer.get("mobile", "")
         if telefone:
             telefone = "".join(filter(str.isdigit, str(telefone)))
@@ -62,49 +66,32 @@ async def webhook_kiwify(request: Request):
         except Exception as err_banco:
             print(f"Erro banco: {str(err_banco)}")
 
-        if status == "approved":
-            busca_url = f"https://api.manychat.com/fb/subscriber/findByCustomField?field_name=email&field_value={email}"
-            find_res = requests.get(busca_url, headers=headers_manychat)
+        # Se a compra foi aprovada E nós temos o ID do ManyChat vindo da Kiwify
+        if status == "approved" and manychat_user_id:
+            tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
+            payload_tag = {
+                "subscriber_id": int(manychat_user_id),
+                "tag_name": "comprou-vigor360"
+            }
+            res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
+            print(f"MANYCHAT TAG STATUS: {res_tag.status_code}")
+            return {"status": "sucesso_funil", "manychat_code": res_tag.status_code}
             
-            if find_res.status_code == 200:
-                subscriber_data = find_res.json().get("data", [])
-                if subscriber_data:
-                    manychat_user_id = subscriber_data[0].get("id")
-                    
-                    tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
-                    payload_tag = {
-                        "subscriber_id": manychat_user_id,
-                        "tag_name": "comprou-vigor360"
-                    }
-                    
-                    res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
-                    return {"status": "sucesso_funil", "manychat_code": res_tag.status_code}
-            return {"status": "comprador_nao_no_manychat"}
-        return {"status": "fim_processamento_status", "status": status}
+        return {"status": "processado_sem_tag", "status": status, "has_id": bool(manychat_user_id)}
     except Exception as e:
+        print(f"Erro Geral: {str(e)}")
         return {"status": "erro_critico", "detalhe": str(e)}
 
-# ROTA SECRETA PARA VOCÊ TESTAR DE GRAÇA PELO NAVEGADOR
-@app.get("/testar-funil")
-def testar_funil(email: str):
+# ROTA DE TESTE DIRETO PELO ID
+@app.get("/testar-id")
+def testar_id(id_user: int):
     try:
-        busca_url = f"https://api.manychat.com/fb/subscriber/findByCustomField?field_name=email&field_value={email}"
-        find_res = requests.get(busca_url, headers=headers_manychat)
-        
-        if find_res.status_code == 200:
-            subscriber_data = find_res.json().get("data", [])
-            if subscriber_data:
-                manychat_user_id = subscriber_data[0].get("id")
-                
-                tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
-                payload_tag = { "subscriber_id": manychat_user_id, "tag_name": "comprou-vigor360" }
-                res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
-                
-                return {"status": "Sucesso!", "mensagem": f"Tag comprou-vigor360 injetada no e-mail {email}", "manychat_code": res_tag.status_code}
-            return {"status": "Erro", "mensagem": f"O e-mail {email} nao foi encontrado dentro do seu ManyChat. Verifique a ficha do contato."}
-        return {"status": "Erro", "mensagem": "Token do ManyChat invalido ou erro na API."}
+        tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
+        payload_tag = { "subscriber_id": id_user, "tag_name": "comprou-vigor360" }
+        res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
+        return {"status": "Resposta da API", "manychat_code": res_tag.status_code, "detalhe": res_tag.text}
     except Exception as e:
-        return {"status": "Erro Critico", "detalhe": str(e)}
+        return {"status": "Erro", "detalhe": str(e)}
 
 @app.get("/")
 def home():
