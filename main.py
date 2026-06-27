@@ -10,7 +10,7 @@ KEY_SUPABASE = os.getenv("SUPABASE_KEY")
 # TOKEN DA API PÚBLICA DO MANYCHAT
 MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
 
-headers_supabase = {
+headers_supabase_padrao = {
     "apikey": KEY_SUPABASE, 
     "Authorization": f"Bearer {KEY_SUPABASE}", 
     "Content-Type": "application/json"
@@ -24,46 +24,31 @@ headers_manychat = {
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        dados_novos = await request.json()
-        mc_id = dados_novos.get("manychat_id")
+        dados_brutos = await request.json()
         
+        # FILTRO CRUCIAL: Remove do envio qualquer campo que veio vazio, nulo ou em branco
+        # Assim o Supabase é obrigado a manter o valor que já estava na tabela
+        dados_limpos = {}
+        for chave, valor in dados_brutos.items():
+            if valor is not None and valor != "" and valor != "None":
+                dados_limpos[chave] = valor
+
+        mc_id = dados_limpos.get("manychat_id")
         if not mc_id:
-            return {"status": "erro", "detalhe": "manychat_id nao enviado"}
-            
-        mc_id_str = str(mc_id).strip()
+            return {"status": "erro", "detalhe": "manychat_id nao enviado ou vazio"}
 
-        # 1. BUSCA SE O LEAD JÁ EXISTE NO BANCO VIA GET
-        url_busca = f"{URL_SUPABASE}/rest/v1/leads_vigor?manychat_id=eq.{mc_id_str}"
-        res_busca = requests.get(url_busca, headers=headers_supabase)
-        leads = res_busca.json()
-
-        if isinstance(leads, list) and len(leads) > 0:
-            # LEAD JÁ EXISTE: Vamos mesclar os dados antigos com os novos no Python
-            lead_antigo = leads[0]
-            
-            # Cria um payload contendo os dados antigos, mas sobrescreve com os novos que NÃO forem vazios
-            payload_atualizacao = {}
-            for chave, valor in lead_antigo.items():
-                # Mantém o que já tinha se o ManyChat não enviou nada novo nesta etapa
-                payload_atualizacao[chave] = valor
-            
-            for chave, valor in dados_novos.items():
-                if valor is not None and valor != "":
-                    payload_atualizacao[chave] = valor
-
-            # Remove chaves de sistema do Supabase para não dar erro na escrita
-            payload_atualizacao.pop("id", None)
-            payload_atualizacao.pop("created_at", None)
-
-            # Faz o UPDATE real via PATCH na linha específica
-            res_update = requests.patch(url_busca, json=payload_atualizacao, headers=headers_supabase)
-            return {"status": "atualizado", "code": res_update.status_code}
-            
-        else:
-            # LEAD NÃO EXISTE: Criação limpa da primeira linha
-            res_insercao = requests.post(f"{URL_SUPABASE}/rest/v1/leads_vigor", json=dados_novos, headers=headers_supabase)
-            return {"status": "criado", "code": res_insercao.status_code}
-
+        headers_webhook = {
+            "apikey": KEY_SUPABASE, 
+            "Authorization": f"Bearer {KEY_SUPABASE}", 
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates"  # Força a fusão das colunas
+        }
+        
+        # Envia apenas o que foi preenchido na etapa atual do fluxo
+        url_upsert = f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id"
+        response = requests.post(url_upsert, json=dados_limpos, headers=headers_webhook)
+        
+        return {"status": "processado", "code": response.status_code}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
@@ -91,7 +76,7 @@ async def webhook_kiwify(request: Request):
                 "status_pagamento": status,
                 "produto": dados_kiwify.get("product_name")
             }
-            requests.post(f"{URL_SUPABASE}/rest/v1/leads_vigor", json=payload_supabase, headers=headers_supabase)
+            requests.post(f"{URL_SUPABASE}/rest/v1/leads_vigor", json=payload_supabase, headers=headers_supabase_padrao)
         except Exception as err_banco:
             print(f"Erro banco kiwify: {str(err_banco)}")
 
