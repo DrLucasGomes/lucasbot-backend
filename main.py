@@ -9,7 +9,7 @@ KEY_SUPABASE = os.getenv("SUPABASE_KEY")
 
 # COLA O SEU TOKEN DO MANYCHAT DIRETO DENTRO DAS ASPAS ABAIXO
 # Apague o os.getenv e cole a chave limpa aqui, sem espaços.
-MANYCHAT_TOKEN = "9730296:e2bbef5228e99eaf17446f519aaa9ca9"
+MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
 
 headers_supabase = {
     "apikey": KEY_SUPABASE, 
