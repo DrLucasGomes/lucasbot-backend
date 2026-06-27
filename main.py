@@ -7,8 +7,8 @@ app = FastAPI()
 URL_SUPABASE = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY_SUPABASE = os.getenv("SUPABASE_KEY") 
 
-# MANTENHA O SEU TOKEN REAL QUE FUNCIONOU AQUI DENTRO
-MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
+# MANTENHA O SEU TOKEN REAL AQUI DENTRO
+MANYCHAT_TOKEN = "COLE_AQUI_O_SEU_TOKEN_DO_MANYCHAT"
 
 headers_supabase = {
     "apikey": KEY_SUPABASE, 
@@ -65,71 +65,62 @@ async def webhook_kiwify(request: Request):
             print(f"Erro banco: {str(err_banco)}")
 
         if status == "approved":
-            # Endpoint direto por e-mail para evitar validação de field_id
-            busca_url = f"https://api.manychat.com/fb/subscriber/findByCustomField?field_name=email&field_value={email}"
-            # Se o findByCustomField exigir o ID, usamos a rota nativa de busca por e-mail do ManyChat:
-            busca_url_alternativa = f"https://api.manychat.com/fb/subscriber/findByName?name={email}" 
-            
-            # Vamos usar a rota mestre de busca por e-mail que não falha:
-            busca_url_v2 = f"https://api.manychat.com/fb/subscriber/findByCustomField?field_id=email&field_value={email}"
-            
-            # Para garantir 100% de acerto sem falhas de validação, buscamos direto:
-            find_res = requests.get(f"https://api.manychat.com/fb/subscriber/findByCustomField?field_name=email&field_value={email}", headers=headers_manychat)
-            
-            # SE A API EXIGIR O FIELD_ID, UTILIZAMOS O PADRÃO DE PROCURAR POR CAMPOS NATIVOS:
+            # Tenta buscar por E-mail primeiro
             payload_busca = {"field_name": "email", "field_value": email}
             find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=payload_busca, headers=headers_manychat)
+            subscriber_data = find_res.json().get("data", [])
 
-            if find_res.status_code == 200:
-                subscriber_data = find_res.json().get("data", [])
-                if subscriber_data:
-                    manychat_user_id = subscriber_data[0].get("id")
-                    
+            # Se não achar por e-mail, busca pelo Telefone (Plano B Blindado)
+            if not subscriber_data and telefone:
+                find_res = requests.get(f"https://api.manychat.com/fb/subscriber/findByName?name={telefone}", headers=headers_manychat)
+                subscriber_data = find_res.json().get("data", []) if "data" in find_res.json() else [find_res.json()]
+
+            if subscriber_data and isinstance(subscriber_data, list) and len(subscriber_data) > 0:
+                user_info = subscriber_data[0]
+                manychat_user_id = user_info.get("id")
+                
+                if manychat_user_id:
                     tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                     payload_tag = {
-                        "subscriber_id": manychat_user_id,
+                        "subscriber_id": int(manychat_user_id),
                         "tag_name": "comprou-vigor360"
                     }
                     res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
                     return {"status": "sucesso_funil", "manychat_code": res_tag.status_code}
             
-            return {"status": "comprador_nao_encontrado_no_manychat", "manychat_response": find_res.text}
+            return {"status": "comprador_nao_encontrado", "email_tentado": email, "tel_tentado": telefone}
             
         return {"status": "fim_processamento_status", "status": status}
     except Exception as e:
         return {"status": "erro_critico", "detalhe": str(e)}
 
+# NOVA ROTA DE TESTE QUE ACEITA TELEFONE OU E-MAIL
 @app.get("/testar-funil")
-def testar_funil(email: str):
+def testar_funil(dado: str):
     try:
-        # Mudamos para uma requisição POST limpa que passa os parâmetros sem bugar o field_id
-        payload_busca = {"field_name": "email", "field_value": email}
+        # Tenta buscar assumindo que é e-mail
+        payload_busca = {"field_name": "email", "field_value": dado}
         find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=payload_busca, headers=headers_manychat)
+        subscriber_data = find_res.json().get("data", [])
         
-        # Se a API ainda chiar do field_id, o plano B definitivo é buscar pelo campo nativo de e-mail na URL
-        if find_res.status_code != 200:
-            find_res = requests.get(f"https://api.manychat.com/fb/subscriber/findByName?name={email}", headers=headers_manychat)
+        # Se falhar ou se for número, busca pelo campo de telefone/nome
+        if not subscriber_data:
+            dado_limpo = "".join(filter(str.isdigit, dado))
+            find_res = requests.get(f"https://api.manychat.com/fb/subscriber/findByName?name={dado_limpo}", headers=headers_manychat)
+            if find_res.status_code == 200:
+                res_json = find_res.json()
+                subscriber_data = res_json.get("data", []) if isinstance(res_json, dict) and "data" in res_json else [res_json]
+
+        if subscriber_data and len(subscriber_data) > 0 and subscriber_data[0].get("id"):
+            manychat_user_id = subscriber_data[0].get("id")
             
-        if find_res.status_code == 200:
-            subscriber_data = find_res.json().get("data", [])
-            if not subscriber_data and "data" not in find_res.json():
-                # Tenta ler formato alternativo
-                subscriber_data = [find_res.json()] if "id" in find_res.json() else []
-                
-            if subscriber_data:
-                # Trata se vier em lista ou dicionário
-                user_info = subscriber_data[0] if isinstance(subscriber_data, list) else subscriber_data
-                manychat_user_id = user_info.get("id")
-                
-                if manychat_user_id:
-                    tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
-                    payload_tag = { "subscriber_id": int(manychat_user_id), "tag_name": "comprou-vigor360" }
-                    res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
-                    
-                    return {"status": "Sucesso!", "mensagem": f"Tag aplicada no e-mail {email}", "manychat_code": res_tag.status_code, "id_localizado": manychat_user_id}
+            tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
+            payload_tag = { "subscriber_id": int(manychat_user_id), "tag_name": "comprou-vigor360" }
+            res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
             
-            return {"status": "Erro", "mensagem": f"E-mail {email} autenticou, mas nao localizou nenhum usuario ativo no ManyChat.", "api_response": find_res.json()}
-        return {"status": "Erro", "mensagem": "Erro de validacao no formato do campo.", "status_code": find_res.status_code, "detalhe": find_res.text}
+            return {"status": "Sucesso!", "mensagem": f"Tag aplicada no lead {dado}", "manychat_code": res_tag.status_code, "id_manychat": manychat_user_id}
+            
+        return {"status": "Erro", "mensagem": f"Nao localizou o usuario por e-mail ou telefone: {dado}"}
     except Exception as e:
         return {"status": "Erro Critico", "detalhe": str(e)}
 
