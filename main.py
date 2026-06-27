@@ -6,7 +6,7 @@ app = FastAPI()
 
 URL_SUPABASE = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY_SUPABASE = os.getenv("SUPABASE_KEY") 
-MANYCHAT_TOKEN = os.getenv("MANYCHAT_TOKEN")
+MANYCHAT_TOKEN = MANYCHAT_TOKEN = "9730296:e2bbef5228e99eaf17446f519aaa9ca9"
 
 headers_supabase = {
     "apikey": KEY_SUPABASE, 
