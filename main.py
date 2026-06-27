@@ -26,29 +26,20 @@ async def webhook(request: Request):
     try:
         dados_brutos = await request.json()
         
-        # FILTRO CRUCIAL: Remove do envio qualquer campo que veio vazio, nulo ou em branco
-        # Assim o Supabase é obrigado a manter o valor que já estava na tabela
+        # Filtra os dados nulos/vazios para não sobrescrever nada no SQL
         dados_limpos = {}
         for chave, valor in dados_brutos.items():
             if valor is not None and valor != "" and valor != "None":
                 dados_limpos[chave] = valor
 
-        mc_id = dados_limpos.get("manychat_id")
-        if not mc_id:
-            return {"status": "erro", "detalhe": "manychat_id nao enviado ou vazio"}
+        if not dados_limpos.get("manychat_id"):
+            return {"status": "erro", "detalhe": "manychat_id obrigatorio"}
 
-        headers_webhook = {
-            "apikey": KEY_SUPABASE, 
-            "Authorization": f"Bearer {KEY_SUPABASE}", 
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates"  # Força a fusão das colunas
-        }
+        # Dispara a função RPC criada direto na raiz do banco de dados
+        url_rpc = f"{URL_SUPABASE}/rest/v1/rpc/salvar_lead_vigor"
+        response = requests.post(url_rpc, json={"p_dados": dados_limpos}, headers=headers_supabase_padrao)
         
-        # Envia apenas o que foi preenchido na etapa atual do fluxo
-        url_upsert = f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id"
-        response = requests.post(url_upsert, json=dados_limpos, headers=headers_webhook)
-        
-        return {"status": "processado", "code": response.status_code}
+        return {"status": "processado_via_rpc", "code": response.status_code}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
