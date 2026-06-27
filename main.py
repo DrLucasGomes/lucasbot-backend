@@ -21,27 +21,47 @@ headers_manychat = {
     "Content-Type": "application/json"
 }
 
-# ROTA WEBHOOK CORRIGIDA: VOLTA O ON_CONFLICT EXIGIDO PELO SEU BANCO, MAS COM TRAVA DE MERGE
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         dados = await request.json()
         
+        # Garante a captura limpa do ID, independente de vir como texto ou número
+        mc_id = dados.get("manychat_id")
+        if not mc_id:
+            return {"status": "erro", "detalhe": "manychat_id obrigatorio"}
+            
+        # Converte para string limpa para injetar no filtro da URL do PostgREST
+        mc_id_str = str(mc_id).strip()
+
         headers_webhook = {
             "apikey": KEY_SUPABASE, 
             "Authorization": f"Bearer {KEY_SUPABASE}", 
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates"  # Força o Supabase a apenas somar os dados, sem apagar as colunas antigas
+            "Content-Type": "application/json"
         }
         
-        # Voltou o on_conflict que o seu banco exige para não dar erro de ID duplicado
-        response = requests.post(
-            f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id", 
-            json=dados, 
-            headers=headers_webhook
-        )
+        # 1. TENTA ATUALIZAR PARCIALMENTE (PATCH) A LINHA QUE JÁ EXISTE
+        url_patch = f"{URL_SUPABASE}/rest/v1/leads_vigor?manychat_id=eq.{mc_id_str}"
+        res_patch = requests.patch(url_patch, json=dados, headers=headers_webhook)
         
-        return {"status": "sucesso", "code": response.status_code}
+        # O Supabase retorna 204 (No Content) quando o PATCH altera uma linha existente com sucesso
+        if res_patch.status_code in [200, 204]:
+            # Se o banco retornar texto vazio ou uma lista vazia "[]", significa que a linha não existia
+            if res_patch.text == "[]" or not res_patch.text:
+                # Se não existia, faz o POST para criar o lead inicial de forma segura
+                headers_post = {
+                    "apikey": KEY_SUPABASE, 
+                    "Authorization": f"Bearer {KEY_SUPABASE}", 
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates"
+                }
+                requests.post(
+                    f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id", 
+                    json=dados, 
+                    headers=headers_post
+                )
+        
+        return {"status": "sucesso", "code": res_patch.status_code}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
