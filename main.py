@@ -25,6 +25,7 @@ headers_manychat = {
 async def webhook(request: Request):
     try:
         dados = await request.json()
+        # CORREÇÃO: Removido o on_conflict que estava travando o ManyChat
         response = requests.post(
             f"{URL_SUPABASE}/rest/v1/leads_vigor", 
             json=dados, 
