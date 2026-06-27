@@ -26,39 +26,27 @@ async def webhook(request: Request):
     try:
         dados_brutos = await request.json()
         
-        # 1. Filtra estritamente tudo que veio vazio ou nulo para o PATCH não sobrescrever
-        dados_limpos = {}
-        for chave, valor in dados_brutos.items():
-            if valor is not None and valor != "" and valor != "None":
-                dados_limpos[chave] = valor
+        # Remove chaves vazias vindas do ManyChat
+        dados_limpos = {k: v for k, v in dados_brutos.items() if v is not None and v != "" and v != "None"}
 
         mc_id = dados_limpos.get("manychat_id")
         if not mc_id:
             return {"status": "erro", "detalhe": "manychat_id obrigatorio"}
-            
-        mc_id_str = str(mc_id).strip()
 
-        # 2. TENTA ATUALIZAR APENAS AS COLUNAS ENVIADAS (PATCH)
-        url_patch = f"{URL_SUPABASE}/rest/v1/leads_vigor?manychat_id=eq.{mc_id_str}"
-        res_patch = requests.patch(url_patch, json=dados_limpos, headers=headers_supabase_padrao)
+        # Cabeçalhos específicos para forçar o UPSERT (Update + Insert) parcial
+        # "ignore-duplicates" avisa: se a linha existir, ignore conflito de chave primária e aplique o merge
+        headers_upsert = {
+            "apikey": KEY_SUPABASE, 
+            "Authorization": f"Bearer {KEY_SUPABASE}", 
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates"
+        }
         
-        # O Supabase retorna código 201/204 se atualizou, ou retorna lista vazia no text se a linha não existir
-        # Se a linha não existe no banco ainda (primeiro passo do funil), usamos o POST para criá-la
-        if res_patch.status_code in [200, 204] and (res_patch.text == "[]" or not res_patch.text):
-            headers_post = {
-                "apikey": KEY_SUPABASE, 
-                "Authorization": f"Bearer {KEY_SUPABASE}", 
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates"
-            }
-            res_post = requests.post(
-                f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id", 
-                json=dados_limpos, 
-                headers=headers_post
-            )
-            return {"status": "criado", "code": res_post.status_code}
-            
-        return {"status": "atualizado_parcial", "code": res_patch.status_code}
+        # Faz a requisição POST com tratamento de conflito direto no manychat_id
+        url_upsert = f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id"
+        response = requests.post(url_upsert, json=dados_limpos, headers=headers_upsert)
+        
+        return {"status": "sucesso", "code": response.status_code}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
