@@ -8,7 +8,7 @@ URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY = os.getenv("SUPABASE_KEY") 
 
 # TOKEN DA API PÚBLICA DO MANYCHAT
-MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
+MANYCHAT_TOKEN = "COLE_AQUI_O_SEU_TOKEN_REAL"
 
 headers_manychat = {
     "Authorization": f"Bearer {MANYCHAT_TOKEN}",
@@ -65,35 +65,49 @@ async def webhook_kiwify(request: Request):
         produto = None
         manychat_user_id = None
 
-        # 1. IDENTIFICA SE É COMPRA OU ABANDONO
-        if "order" in dados_kiwify:
-            ordem = dados_kiwify.get("order", {})
+        # 1. PEGA O BLOCO DA ORDEM (COMPRA) TRATANDO MAIÚSCULAS/MINÚSCULAS
+        ordem = dados_kiwify.get("order") or dados_kiwify.get("Order")
+        carrinho = dados_kiwify.get("cart") or dados_kiwify.get("Cart")
+
+        if ordem:
             status = ordem.get("order_status")  # "paid"
-            produto = ordem.get("Product", {}).get("product_name")
-            customer = ordem.get("Customer", {})
-            nome = customer.get("full_name")
-            email = customer.get("email")
-            telefone = customer.get("mobile", "")
             
-            custom_variables = ordem.get("custom_variables", {})
+            # Extrai dados do Produto tratando "Product" ou "product"
+            bloco_produto = ordem.get("Product") or ordem.get("product") or {}
+            produto = bloco_produto.get("product_name")
+            
+            # Extrai dados do Cliente tratando "Customer" ou "customer"
+            bloco_customer = ordem.get("Customer") or ordem.get("customer") or {}
+            nome = bloco_customer.get("full_name") or bloco_customer.get("name")
+            email = bloco_customer.get("email")
+            telefone = bloco_customer.get("mobile") or bloco_customer.get("phone")
+            
+            # Busca variáveis customizadas de rastreio
+            custom_variables = ordem.get("custom_variables") or ordem.get("CustomVariables") or {}
             if custom_variables:
                 manychat_user_id = custom_variables.get("manychat_id")
 
-        elif "cart" in dados_kiwify:
-            carrinho = dados_kiwify.get("cart", {})
+        # 2. PEGA O BLOCO DO CARRINHO ABANDONADO
+        elif carrinho:
             status = carrinho.get("status")  # "abandoned"
             produto = carrinho.get("product_name")
-            nome = carrinho.get("name")
+            nome = carrinho.get("name") or carrinho.get("full_name")
             email = carrinho.get("email")
-            telefone = carrinho.get("phone", "")
+            telefone = carrinho.get("phone") or carrinho.get("mobile")
 
+        # Limpa o telefone deixando apenas números
         if telefone:
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
+        # Se a checagem falhar por completo, usa segurança máxima buscando na raiz do payload
         if not email:
-            return {"status": "ignorado", "detalhe": "JSON sem dados de contato"}
+            email = dados_kiwify.get("email")
+            nome = dados_kiwify.get("name")
+            telefone = dados_kiwify.get("phone")
 
-        # Payload base para atualizar ou inserir no banco
+        if not email:
+            return {"status": "ignorado", "detalhe": "JSON sem dados de contato acessiveis"}
+
         payload_supabase = {
             "nome": nome,
             "email": email,
@@ -102,10 +116,9 @@ async def webhook_kiwify(request: Request):
             "produto": produto
         }
 
-        # 2. ENGENHARIA DE UNIFICAÇÃO DE LINHA (PROCURA POR ID OU TELEFONE)
+        # 3. UNIFICAÇÃO NA MESMA LINHA DO SUPABASE
         lead_encontrado_por_telefone = False
         
-        # Se veio o id do ManyChat direto da Kiwify (melhor dos mundos)
         if manychat_user_id and str(manychat_user_id).strip() != "" and str(manychat_user_id).lower() != "none":
             payload_supabase["manychat_id"] = str(manychat_user_id).strip()
             headers_upsert = {
@@ -116,33 +129,28 @@ async def webhook_kiwify(request: Request):
             }
             requests.post(f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", json=payload_supabase, headers=headers_upsert)
         
-        # Se NÃO veio o ID, mas temos o telefone, vamos caçar o cara na tabela
         elif telefone:
-            # Faz uma busca no Supabase filtrando pelo telefone limpo
             url_busca = f"{URL}/rest/v1/leads_vigor?telefone=eq.{telefone}"
             resposta_busca = requests.get(url_busca, headers=headers_supabase_padrao)
             
             if resposta_busca.status_code == 200:
                 leads = resposta_busca.json()
                 if isinstance(leads, list) and len(leads) > 0:
-                    # Achou o cara do WhatsApp! Vamos atualizar a MESMA linha usando o manychat_id dele
                     id_existente = leads[0].get("manychat_id")
                     if id_existente:
                         url_patch = f"{URL}/rest/v1/leads_vigor?manychat_id=eq.{id_existente}"
-                        # Atualiza apenas o status e o produto para não mexer no resto da jornada
                         payload_patch = {
                             "status_pagamento": status,
                             "produto": produto,
-                            "email": email # Garante o email preenchido se não tivesse antes
+                            "email": email
                         }
                         requests.patch(url_patch, json=payload_patch, headers=headers_supabase_padrao)
                         lead_encontrado_por_telefone = True
 
-        # Se não achou por ID e nem por telefone, cria um registro novo separado para não perder o dado
         if not manychat_user_id and not lead_encontrado_por_telefone:
             requests.post(f"{URL}/rest/v1/leads_vigor", json=payload_supabase, headers=headers_supabase_padrao)
 
-        # 3. DISPARO DE TAG DE COMPRA NO MANYCHAT
+        # 4. ENTREGA DE TAGS NO MANYCHAT PARA PEDIDOS PAGOS
         if status in ["paid", "approved", "order_approved"]:
             if manychat_user_id:
                 tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
