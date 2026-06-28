@@ -15,6 +15,12 @@ headers_manychat = {
     "Content-Type": "application/json"
 }
 
+headers_supabase_padrao = {
+    "apikey": KEY, 
+    "Authorization": f"Bearer {KEY}", 
+    "Content-Type": "application/json"
+}
+
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -26,32 +32,38 @@ async def webhook(request: Request):
             
         mc_id_str = str(mc_id).strip()
 
-        # REMOVE TUDO QUE FOR NULO, VAZIO OR STRING "NONE"
-        # Isso impede que o ManyChat limpe o banco na segunda etapa
+        # PENTE FINO: Remove chaves nulas, vazias, espaços em branco ou texto "none"
         dados_limpos = {}
         for k, v in dados_brutos.items():
-            if v is not None and str(v).strip() != "" and str(v).lower() != "none":
-                dados_limpos[k] = v
+            if v is not None:
+                valor_str = str(v).strip()
+                if valor_str != "" and valor_str.lower() != "none":
+                    dados_limpos[k] = v
 
-        # Garante o ID correto no payload final
+        # Garante que o ID não se perca no filtro
         dados_limpos["manychat_id"] = mc_id_str
 
-        headers_supabase = {
-            "apikey": KEY, 
-            "Authorization": f"Bearer {KEY}", 
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates"
-        }
+        # 1. TENTA ATUALIZAR APENAS OS CAMPOS ENVIADOS USANDO PATCH VIA URL
+        url_patch = f"{URL}/rest/v1/leads_vigor?manychat_id=eq.{mc_id_str}"
+        response = requests.patch(url_patch, json=dados_limpos, headers=headers_supabase_padrao)
         
-        # Faz o upsert direto com os dados limpos
-        url_upsert = f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id"
-        response = requests.post(url_upsert, json=dados_limpos, headers=headers_supabase)
-        
-        return {"status": "sucesso", "code": response.status_code}
+        # 2. SE A LINHA NÃO EXISTIR (RETORNO VAZIO DO PATCH), FAZ O POST PARA CRIAR
+        if response.status_code in [200, 204] and (response.text == "[]" or not response.text):
+            headers_post = {
+                "apikey": KEY, 
+                "Authorization": f"Bearer {KEY}", 
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            }
+            url_post = f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id"
+            response = requests.post(url_post, json=dados_limpos, headers=headers_post)
+            return {"status": "sucesso_criado", "code": response.status_code}
+            
+        return {"status": "sucesso_atualizado", "code": response.status_code}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
-# ROTA DA KIWIFY - TOTALMENTE ISOLADA E LIMPA
+# ROTA DA KIWIFY ISOLADA
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
@@ -68,29 +80,26 @@ async def webhook_kiwify(request: Request):
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
         try:
-            headers_kiwify_supabase = {
-                "apikey": KEY, 
-                "Authorization": f"Bearer {KEY}", 
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates"
-            }
             payload_supabase = {
                 "nome": customer.get("name"),
                 "email": email,
                 "telefone": telefone,
                 "status_pagamento": status,
-                "produto": dados_kiwify.get("product_name"),
-                "manychat_id": str(manychat_user_id).strip() if manychat_user_id else None
+                "produto": dados_kiwify.get("product_name")
             }
             
-            # Limpeza também na rota da Kiwify
-            payload_limpo = {k: v for k, v in payload_supabase.items() if v is not None and str(v).strip() != ""}
-            
-            requests.post(
-                f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", 
-                json=payload_limpo, 
-                headers=headers_kiwify_supabase
-            )
+            if manychat_user_id and str(manychat_user_id).strip() != "" and str(manychat_user_id).lower() != "none":
+                payload_supabase["manychat_id"] = str(manychat_user_id).strip()
+                headers_upsert = {
+                    "apikey": KEY, 
+                    "Authorization": f"Bearer {KEY}", 
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates"
+                }
+                requests.post(f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", json=payload_supabase, headers=headers_upsert)
+            else:
+                requests.post(f"{URL}/rest/v1/leads_vigor", json=payload_supabase, headers=headers_supabase_padrao)
+                
         except Exception as err_banco:
             print(f"Erro banco kiwify: {str(err_banco)}")
 
