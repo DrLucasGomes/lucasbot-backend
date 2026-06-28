@@ -24,27 +24,21 @@ headers_manychat = {
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        dados_brutos = await request.json()
+        dados = await request.json()
         
-        # Remove chaves vazias vindas do ManyChat
-        dados_limpos = {k: v for k, v in dados_brutos.items() if v is not None and v != "" and v != "None"}
-
-        mc_id = dados_limpos.get("manychat_id")
-        if not mc_id:
+        if not dados.get("manychat_id"):
             return {"status": "erro", "detalhe": "manychat_id obrigatorio"}
 
-        # Cabeçalhos específicos para forçar o UPSERT (Update + Insert) parcial
-        # "ignore-duplicates" avisa: se a linha existir, ignore conflito de chave primária e aplique o merge
-        headers_upsert = {
+        headers_webhook = {
             "apikey": KEY_SUPABASE, 
             "Authorization": f"Bearer {KEY_SUPABASE}", 
             "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates"
+            "Prefer": "resolution=merge-duplicates"  # Aciona a nossa regra do gatilho
         }
         
-        # Faz a requisição POST com tratamento de conflito direto no manychat_id
+        # Envia os dados brutos. O gatilho do banco vai impedir a perda de dados antigos
         url_upsert = f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id"
-        response = requests.post(url_upsert, json=dados_limpos, headers=headers_upsert)
+        response = requests.post(url_upsert, json=dados, headers=headers_webhook)
         
         return {"status": "sucesso", "code": response.status_code}
     except Exception as e:
