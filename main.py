@@ -24,25 +24,54 @@ headers_manychat = {
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        dados = await request.json()
+        dados_brutos = await request.json()
         
-        if not dados.get("manychat_id"):
-            return {"status": "erro", "detalhe": "manychat_id obrigatorio"}
+        # 1. Remove qualquer campo vazio para o PATCH não limpar o banco
+        dados_limpos = {}
+        for chave, valor in dados_brutos.items():
+            if valor is not None and valor != "" and str(valor).lower() != "none":
+                dados_limpos[chave] = valor
 
+        mc_id = dados_limpos.get("manychat_id")
+        if not mc_id:
+            return {"status": "erro", "detalhe": "manychat_id obrigatorio no payload"}
+
+        mc_id_str = str(mc_id).strip()
+
+        # Configuração de cabeçalhos estrita para o Supabase
         headers_webhook = {
             "apikey": KEY_SUPABASE, 
             "Authorization": f"Bearer {KEY_SUPABASE}", 
             "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates"  # Aciona a nossa regra do gatilho
+            "Prefer": "return=representation"  # Força o banco a responder o que foi feito
         }
+
+        # 2. TENTA FAZER O PATCH PARCIAL USANDO FILTRO NA URL
+        url_patch = f"{URL_SUPABASE}/rest/v1/leads_vigor?manychat_id=eq.{mc_id_str}"
+        response_patch = requests.patch(url_patch, json=dados_limpos, headers=headers_webhook)
         
-        # Envia os dados brutos. O gatilho do banco vai impedir a perda de dados antigos
-        url_upsert = f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id"
-        response = requests.post(url_upsert, json=dados, headers=headers_webhook)
-        
-        return {"status": "sucesso", "code": response.status_code}
+        # Se o banco respondeu sucesso (200/204), mas voltou uma lista vazia "[]", o lead é novo e precisa ser criado
+        if response_patch.status_code in [200, 201, 204] and (response_patch.text == "[]" or not response_patch.text):
+            headers_post = {
+                "apikey": KEY_SUPABASE, 
+                "Authorization": f"Bearer {KEY_SUPABASE}", 
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            }
+            url_post = f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id"
+            response_post = requests.post(url_post, json=dados_limpos, headers=headers_post)
+            return {"status": "criado_novo_lead", "code": response_post.status_code}
+
+        # Se der erro no PATCH (como código 400 ou 409), joga no log para sabermos a coluna exata com problema
+        if response_patch.status_code >= 400:
+            print(f"⚠️ ERRO SUPABASE DETECTADO: {response_patch.text}")
+            return {"status": "erro_supabase", "resposta_banco": response_patch.text, "code": response_patch.status_code}
+            
+        return {"status": "atualizado_parcial_com_sucesso", "code": response_patch.status_code}
+
     except Exception as e:
-        return {"status": "erro", "detalhe": str(e)}
+        print(f"💥 ERRO CRÍTICO NO WEBHOOK: {str(e)}")
+        return {"status": "erro_interno", "detalhe": str(e)}
 
 # ROTA DA KIWIFY
 @app.post("/kiwify")
