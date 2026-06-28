@@ -7,40 +7,56 @@ app = FastAPI()
 URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY = os.getenv("SUPABASE_KEY") 
 
-# TOKEN DA API PÚBLICA DO MANYCHAT PARA A VALIDAÇÃO DA KIWIFY
-MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
+# TOKEN DA API PÚBLICA DO MANYCHAT
+MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bfL"
 
 headers_manychat = {
     "Authorization": f"Bearer {MANYCHAT_TOKEN}",
     "Content-Type": "application/json"
 }
 
-# SEU WEBHOOK ORIGINAL DE QUARTA-FEIRA À NOITE — INTOCADO E BRUTO
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        dados = await request.json()
+        dados_brutos = await request.json()
         
-        headers = {
+        # Pega o ID independente de como ele venha no seu JSON bruto
+        mc_id = dados_brutos.get("manychat_id")
+        if not mc_id:
+            return {"status": "erro", "detalhe": "manychat_id nao encontrado"}
+            
+        mc_id_str = str(mc_id).strip()
+
+        # Limpa o JSON tirando campos vazios para o banco não zerar as colunas antigas
+        dados_limpos = {k: v for k, v in dados_brutos.items() if v is not None and v != "" and str(v).lower() != "none"}
+
+        headers_supabase = {
             "apikey": KEY, 
             "Authorization": f"Bearer {KEY}", 
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates" 
+            "Content-Type": "application/json"
         }
         
-        # Faz exatamente o envio duplo que você tinha e que dava certo
-        response = requests.post(f"{URL}/rest/v1/leads_vigor", json=dados, headers=headers)
-        response = requests.post(
-            f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", 
-            json=dados, 
-            headers=headers
-        )
+        # ETAPA 1: Tenta atualizar apenas os campos enviados usando PATCH
+        url_patch = f"{URL}/rest/v1/leads_vigor?manychat_id=eq.{mc_id_str}"
+        response = requests.patch(url_patch, json=dados_limpos, headers=headers_supabase)
         
-        return {"status": "sucesso", "code": response.status_code}
+        # ETAPA 2: Se o banco respondeu mas a linha não existia (retorno vazio), cria o lead com POST
+        if response.status_code in [200, 204] and (response.text == "[]" or not response.text):
+            headers_post = {
+                "apikey": KEY, 
+                "Authorization": f"Bearer {KEY}", 
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            }
+            url_post = f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id"
+            response = requests.post(url_post, json=dados_limpos, headers=headers_post)
+            return {"status": "sucesso_criado", "code": response.status_code}
+            
+        return {"status": "sucesso_atualizado_etapa", "code": response.status_code}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
-# ROTA DA KIWIFY ISOLADA PARA NÃO ATRAPALHAR O SEU FLUXO DO WHATSAPP
+# ROTA DA KIWIFY - TOTALMENTE ISOLADA
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
@@ -57,7 +73,6 @@ async def webhook_kiwify(request: Request):
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
         try:
-            # Envia os dados de compra da Kiwify respeitando o on_conflict da tabela
             headers_kiwify_supabase = {
                 "apikey": KEY, 
                 "Authorization": f"Bearer {KEY}", 
@@ -72,7 +87,6 @@ async def webhook_kiwify(request: Request):
                 "produto": dados_kiwify.get("product_name"),
                 "manychat_id": str(manychat_user_id).strip() if manychat_user_id else None
             }
-            # Remove valores nulos para não dar conflito nas colunas do WhatsApp
             payload_limpo = {k: v for k, v in payload_supabase.items() if v is not None and v != ""}
             
             requests.post(
@@ -84,7 +98,6 @@ async def webhook_kiwify(request: Request):
             print(f"Erro banco kiwify: {str(err_banco)}")
 
         if status == "approved":
-            # Disparo de Tag no ManyChat pós-venda
             if manychat_user_id:
                 tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                 payload_tag = {"subscriber_id": int(manychat_user_id), "tag_name": "comprou-vigor360"}
