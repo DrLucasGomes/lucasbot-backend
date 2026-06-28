@@ -8,7 +8,7 @@ URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY = os.getenv("SUPABASE_KEY") 
 
 # TOKEN DA API PÚBLICA DO MANYCHAT
-MANYCHAT_TOKEN = "COLE_AQUI_O_SEU_TOKEN_REAL"
+MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
 
 headers_manychat = {
     "Authorization": f"Bearer {MANYCHAT_TOKEN}",
