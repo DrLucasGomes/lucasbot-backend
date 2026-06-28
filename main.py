@@ -8,7 +8,7 @@ URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY = os.getenv("SUPABASE_KEY") 
 
 # TOKEN DA API PÚBLICA DO MANYCHAT
-MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bfL"
+MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
 
 headers_manychat = {
     "Authorization": f"Bearer {MANYCHAT_TOKEN}",
@@ -20,39 +20,30 @@ async def webhook(request: Request):
     try:
         dados_brutos = await request.json()
         
-        # Pega o ID independente de como ele venha no seu JSON bruto
+        # Pega o ID único do ManyChat
         mc_id = dados_brutos.get("manychat_id")
         if not mc_id:
             return {"status": "erro", "detalhe": "manychat_id nao encontrado"}
             
         mc_id_str = str(mc_id).strip()
 
-        # Limpa o JSON tirando campos vazios para o banco não zerar as colunas antigas
+        # Limpa o payload removendo chaves vazias ou nulas vindas do ManyChat
         dados_limpos = {k: v for k, v in dados_brutos.items() if v is not None and v != "" and str(v).lower() != "none"}
+        dados_limpos["manychat_id"] = mc_id_str
 
+        # Cabeçalho duplo: força a fusão das colunas e exige o retorno do banco para validação
         headers_supabase = {
             "apikey": KEY, 
             "Authorization": f"Bearer {KEY}", 
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates, return=representation"
         }
         
-        # ETAPA 1: Tenta atualizar apenas os campos enviados usando PATCH
-        url_patch = f"{URL}/rest/v1/leads_vigor?manychat_id=eq.{mc_id_str}"
-        response = requests.patch(url_patch, json=dados_limpos, headers=headers_supabase)
+        # Faz o disparo único via POST que o seu banco aceita sem bloquear
+        url_upsert = f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id"
+        response = requests.post(url_upsert, json=dados_limpos, headers=headers_supabase)
         
-        # ETAPA 2: Se o banco respondeu mas a linha não existia (retorno vazio), cria o lead com POST
-        if response.status_code in [200, 204] and (response.text == "[]" or not response.text):
-            headers_post = {
-                "apikey": KEY, 
-                "Authorization": f"Bearer {KEY}", 
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates"
-            }
-            url_post = f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id"
-            response = requests.post(url_post, json=dados_limpos, headers=headers_post)
-            return {"status": "sucesso_criado", "code": response.status_code}
-            
-        return {"status": "sucesso_atualizado_etapa", "code": response.status_code}
+        return {"status": "sucesso", "code": response.status_code}
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
