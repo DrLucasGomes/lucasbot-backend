@@ -53,13 +53,11 @@ async def webhook(request: Request):
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
-# ROTA DA KIWIFY CORRIGIDA E ADAPTADA AOS JSONS REAIS
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
         dados_kiwify = await request.json()
         
-        # Inicializa variáveis padrão
         status = None
         nome = None
         email = None
@@ -67,40 +65,35 @@ async def webhook_kiwify(request: Request):
         produto = None
         manychat_user_id = None
 
-        # 1. TRATAMENTO PARA COMPRA (CONFORME SEU PRIMEIRO JSON)
+        # 1. IDENTIFICA SE É COMPRA OU ABANDONO
         if "order" in dados_kiwify:
             ordem = dados_kiwify.get("order", {})
-            status = ordem.get("order_status")  # vai receber "paid"
+            status = ordem.get("order_status")  # "paid"
             produto = ordem.get("Product", {}).get("product_name")
-            
             customer = ordem.get("Customer", {})
             nome = customer.get("full_name")
             email = customer.get("email")
             telefone = customer.get("mobile", "")
             
-            # Busca o id nas custom_variables se existirem
             custom_variables = ordem.get("custom_variables", {})
             if custom_variables:
                 manychat_user_id = custom_variables.get("manychat_id")
 
-        # 2. TRATAMENTO PARA CARRINHO ABANDONADO (CONFORME SEU SEGUNDO JSON)
         elif "cart" in dados_kiwify:
             carrinho = dados_kiwify.get("cart", {})
-            status = carrinho.get("status")  # vai receber "abandoned"
+            status = carrinho.get("status")  # "abandoned"
             produto = carrinho.get("product_name")
             nome = carrinho.get("name")
             email = carrinho.get("email")
             telefone = carrinho.get("phone", "")
 
-        # Limpa o telefone deixando só números
         if telefone:
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
-        # Se não capturou dados mínimos, aborta para não quebrar o banco
         if not email:
-            return {"status": "ignorado", "detalhe": "JSON sem dados de cliente"}
+            return {"status": "ignorado", "detalhe": "JSON sem dados de contato"}
 
-        # Prepara a gravação no Supabase
+        # Payload base para atualizar ou inserir no banco
         payload_supabase = {
             "nome": nome,
             "email": email,
@@ -109,23 +102,47 @@ async def webhook_kiwify(request: Request):
             "produto": produto
         }
 
-        try:
-            if manychat_user_id and str(manychat_user_id).strip() != "" and str(manychat_user_id).lower() != "none":
-                payload_supabase["manychat_id"] = str(manychat_user_id).strip()
-                headers_upsert = {
-                    "apikey": KEY, 
-                    "Authorization": f"Bearer {KEY}", 
-                    "Content-Type": "application/json",
-                    "Prefer": "resolution=merge-duplicates"
-                }
-                requests.post(f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", json=payload_supabase, headers=headers_upsert)
-            else:
-                # Se não veio ID, joga como registro avulso para não sobrescrever a jornada do Whats
-                requests.post(f"{URL}/rest/v1/leads_vigor", json=payload_supabase, headers=headers_supabase_padrao)
-        except Exception as err_banco:
-            print(f"Erro banco kiwify: {str(err_banco)}")
+        # 2. ENGENHARIA DE UNIFICAÇÃO DE LINHA (PROCURA POR ID OU TELEFONE)
+        lead_encontrado_por_telefone = False
+        
+        # Se veio o id do ManyChat direto da Kiwify (melhor dos mundos)
+        if manychat_user_id and str(manychat_user_id).strip() != "" and str(manychat_user_id).lower() != "none":
+            payload_supabase["manychat_id"] = str(manychat_user_id).strip()
+            headers_upsert = {
+                "apikey": KEY, 
+                "Authorization": f"Bearer {KEY}", 
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            }
+            requests.post(f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", json=payload_supabase, headers=headers_upsert)
+        
+        # Se NÃO veio o ID, mas temos o telefone, vamos caçar o cara na tabela
+        elif telefone:
+            # Faz uma busca no Supabase filtrando pelo telefone limpo
+            url_busca = f"{URL}/rest/v1/leads_vigor?telefone=eq.{telefone}"
+            resposta_busca = requests.get(url_busca, headers=headers_supabase_padrao)
+            
+            if resposta_busca.status_code == 200:
+                leads = resposta_busca.json()
+                if isinstance(leads, list) and len(leads) > 0:
+                    # Achou o cara do WhatsApp! Vamos atualizar a MESMA linha usando o manychat_id dele
+                    id_existente = leads[0].get("manychat_id")
+                    if id_existente:
+                        url_patch = f"{URL}/rest/v1/leads_vigor?manychat_id=eq.{id_existente}"
+                        # Atualiza apenas o status e o produto para não mexer no resto da jornada
+                        payload_patch = {
+                            "status_pagamento": status,
+                            "produto": produto,
+                            "email": email # Garante o email preenchido se não tivesse antes
+                        }
+                        requests.patch(url_patch, json=payload_patch, headers=headers_supabase_padrao)
+                        lead_encontrado_por_telefone = True
 
-        # 3. DISPARO DE TAG DE COMPRA NO MANYCHAT (Se status for "paid" ou "approved")
+        # Se não achou por ID e nem por telefone, cria um registro novo separado para não perder o dado
+        if not manychat_user_id and not lead_encontrado_por_telefone:
+            requests.post(f"{URL}/rest/v1/leads_vigor", json=payload_supabase, headers=headers_supabase_padrao)
+
+        # 3. DISPARO DE TAG DE COMPRA NO MANYCHAT
         if status in ["paid", "approved", "order_approved"]:
             if manychat_user_id:
                 tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
@@ -133,7 +150,6 @@ async def webhook_kiwify(request: Request):
                 res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
                 return {"status": "sucesso_id_direto", "manychat_code": res_tag.status_code}
 
-            # Busca detetive por email se o ID direto falhar
             payload_busca = {"field_name": "email", "field_value": email}
             find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=payload_busca, headers=headers_manychat)
             subscriber_data = find_res.json().get("data", [])
