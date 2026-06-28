@@ -20,26 +20,30 @@ async def webhook(request: Request):
     try:
         dados_brutos = await request.json()
         
-        # Pega o ID único do ManyChat
         mc_id = dados_brutos.get("manychat_id")
         if not mc_id:
             return {"status": "erro", "detalhe": "manychat_id nao encontrado"}
             
         mc_id_str = str(mc_id).strip()
 
-        # Limpa o payload removendo chaves vazias ou nulas vindas do ManyChat
-        dados_limpos = {k: v for k, v in dados_brutos.items() if v is not None and v != "" and str(v).lower() != "none"}
+        # REMOVE TUDO QUE FOR NULO, VAZIO OR STRING "NONE"
+        # Isso impede que o ManyChat limpe o banco na segunda etapa
+        dados_limpos = {}
+        for k, v in dados_brutos.items():
+            if v is not None and str(v).strip() != "" and str(v).lower() != "none":
+                dados_limpos[k] = v
+
+        # Garante o ID correto no payload final
         dados_limpos["manychat_id"] = mc_id_str
 
-        # Cabeçalho duplo: força a fusão das colunas e exige o retorno do banco para validação
         headers_supabase = {
             "apikey": KEY, 
             "Authorization": f"Bearer {KEY}", 
             "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates, return=representation"
+            "Prefer": "resolution=merge-duplicates"
         }
         
-        # Faz o disparo único via POST que o seu banco aceita sem bloquear
+        # Faz o upsert direto com os dados limpos
         url_upsert = f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id"
         response = requests.post(url_upsert, json=dados_limpos, headers=headers_supabase)
         
@@ -47,7 +51,7 @@ async def webhook(request: Request):
     except Exception as e:
         return {"status": "erro", "detalhe": str(e)}
 
-# ROTA DA KIWIFY - TOTALMENTE ISOLADA
+# ROTA DA KIWIFY - TOTALMENTE ISOLADA E LIMPA
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
@@ -78,7 +82,9 @@ async def webhook_kiwify(request: Request):
                 "produto": dados_kiwify.get("product_name"),
                 "manychat_id": str(manychat_user_id).strip() if manychat_user_id else None
             }
-            payload_limpo = {k: v for k, v in payload_supabase.items() if v is not None and v != ""}
+            
+            # Limpeza também na rota da Kiwify
+            payload_limpo = {k: v for k, v in payload_supabase.items() if v is not None and str(v).strip() != ""}
             
             requests.post(
                 f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", 
