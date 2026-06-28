@@ -4,76 +4,43 @@ import os
 
 app = FastAPI()
 
-URL_SUPABASE = "https://gwxcnczuwfrswhkzflaw.supabase.co"
-KEY_SUPABASE = os.getenv("SUPABASE_KEY") 
+URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
+KEY = os.getenv("SUPABASE_KEY") 
 
-# TOKEN DA API PÚBLICA DO MANYCHAT
+# TOKEN DA API PÚBLICA DO MANYCHAT PARA A VALIDAÇÃO DA KIWIFY
 MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
-
-headers_supabase_padrao = {
-    "apikey": KEY_SUPABASE, 
-    "Authorization": f"Bearer {KEY_SUPABASE}", 
-    "Content-Type": "application/json"
-}
 
 headers_manychat = {
     "Authorization": f"Bearer {MANYCHAT_TOKEN}",
     "Content-Type": "application/json"
 }
 
+# SEU WEBHOOK ORIGINAL DE QUARTA-FEIRA À NOITE — INTOCADO E BRUTO
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        dados_brutos = await request.json()
+        dados = await request.json()
         
-        # 1. Remove qualquer campo vazio para o PATCH não limpar o banco
-        dados_limpos = {}
-        for chave, valor in dados_brutos.items():
-            if valor is not None and valor != "" and str(valor).lower() != "none":
-                dados_limpos[chave] = valor
-
-        mc_id = dados_limpos.get("manychat_id")
-        if not mc_id:
-            return {"status": "erro", "detalhe": "manychat_id obrigatorio no payload"}
-
-        mc_id_str = str(mc_id).strip()
-
-        # Configuração de cabeçalhos estrita para o Supabase
-        headers_webhook = {
-            "apikey": KEY_SUPABASE, 
-            "Authorization": f"Bearer {KEY_SUPABASE}", 
+        headers = {
+            "apikey": KEY, 
+            "Authorization": f"Bearer {KEY}", 
             "Content-Type": "application/json",
-            "Prefer": "return=representation"  # Força o banco a responder o que foi feito
+            "Prefer": "resolution=merge-duplicates" 
         }
-
-        # 2. TENTA FAZER O PATCH PARCIAL USANDO FILTRO NA URL
-        url_patch = f"{URL_SUPABASE}/rest/v1/leads_vigor?manychat_id=eq.{mc_id_str}"
-        response_patch = requests.patch(url_patch, json=dados_limpos, headers=headers_webhook)
         
-        # Se o banco respondeu sucesso (200/204), mas voltou uma lista vazia "[]", o lead é novo e precisa ser criado
-        if response_patch.status_code in [200, 201, 204] and (response_patch.text == "[]" or not response_patch.text):
-            headers_post = {
-                "apikey": KEY_SUPABASE, 
-                "Authorization": f"Bearer {KEY_SUPABASE}", 
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates"
-            }
-            url_post = f"{URL_SUPABASE}/rest/v1/leads_vigor?on_conflict=manychat_id"
-            response_post = requests.post(url_post, json=dados_limpos, headers=headers_post)
-            return {"status": "criado_novo_lead", "code": response_post.status_code}
-
-        # Se der erro no PATCH (como código 400 ou 409), joga no log para sabermos a coluna exata com problema
-        if response_patch.status_code >= 400:
-            print(f"⚠️ ERRO SUPABASE DETECTADO: {response_patch.text}")
-            return {"status": "erro_supabase", "resposta_banco": response_patch.text, "code": response_patch.status_code}
-            
-        return {"status": "atualizado_parcial_com_sucesso", "code": response_patch.status_code}
-
+        # Faz exatamente o envio duplo que você tinha e que dava certo
+        response = requests.post(f"{URL}/rest/v1/leads_vigor", json=dados, headers=headers)
+        response = requests.post(
+            f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", 
+            json=dados, 
+            headers=headers
+        )
+        
+        return {"status": "sucesso", "code": response.status_code}
     except Exception as e:
-        print(f"💥 ERRO CRÍTICO NO WEBHOOK: {str(e)}")
-        return {"status": "erro_interno", "detalhe": str(e)}
+        return {"status": "erro", "detalhe": str(e)}
 
-# ROTA DA KIWIFY
+# ROTA DA KIWIFY ISOLADA PARA NÃO ATRAPALHAR O SEU FLUXO DO WHATSAPP
 @app.post("/kiwify")
 async def webhook_kiwify(request: Request):
     try:
@@ -90,18 +57,34 @@ async def webhook_kiwify(request: Request):
             telefone = "".join(filter(str.isdigit, str(telefone)))
 
         try:
+            # Envia os dados de compra da Kiwify respeitando o on_conflict da tabela
+            headers_kiwify_supabase = {
+                "apikey": KEY, 
+                "Authorization": f"Bearer {KEY}", 
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates"
+            }
             payload_supabase = {
                 "nome": customer.get("name"),
                 "email": email,
                 "telefone": telefone,
                 "status_pagamento": status,
-                "produto": dados_kiwify.get("product_name")
+                "produto": dados_kiwify.get("product_name"),
+                "manychat_id": str(manychat_user_id).strip() if manychat_user_id else None
             }
-            requests.post(f"{URL_SUPABASE}/rest/v1/leads_vigor", json=payload_supabase, headers=headers_supabase_padrao)
+            # Remove valores nulos para não dar conflito nas colunas do WhatsApp
+            payload_limpo = {k: v for k, v in payload_supabase.items() if v is not None and v != ""}
+            
+            requests.post(
+                f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id", 
+                json=payload_limpo, 
+                headers=headers_kiwify_supabase
+            )
         except Exception as err_banco:
             print(f"Erro banco kiwify: {str(err_banco)}")
 
         if status == "approved":
+            # Disparo de Tag no ManyChat pós-venda
             if manychat_user_id:
                 tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                 payload_tag = {"subscriber_id": int(manychat_user_id), "tag_name": "comprou-vigor360"}
@@ -130,16 +113,6 @@ async def webhook_kiwify(request: Request):
         return {"status": "fim_processamento_status", "status": status}
     except Exception as e:
         return {"status": "erro_critico", "detalhe": str(e)}
-
-@app.get("/testar-id")
-def testar_id(id_user: int):
-    try:
-        tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
-        payload_tag = { "subscriber_id": id_user, "tag_name": "comprou-vigor360" }
-        res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
-        return {"status": "Comando Enviado!", "manychat_code": res_tag.status_code}
-    except Exception as e:
-        return {"status": "Erro", "detalhe": str(e)}
 
 @app.get("/")
 def home():
