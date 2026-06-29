@@ -207,125 +207,51 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
         produto = None
         manychat_user_id = None
 
-        ordem = dados_kiwify.get("order") or dados_kiwify.get("Order") or {}
-carrinho = dados_kiwify.get("cart") or dados_kiwify.get("Cart") or {}
+        ordem = dados_kiwify.get("order") or dados_kiwify.get("Order")
+        carrinho = dados_kiwify.get("cart") or dados_kiwify.get("Cart")
 
-# ===========================
-# PEDIDO (COMPRA)
-# ===========================
+        if ordem:
+            status = ordem.get("order_status")
 
-if isinstance(ordem, dict) and ordem:
+            bloco_produto = ordem.get("Product") or ordem.get("product") or {}
+            produto = bloco_produto.get("product_name")
 
-    status = (
-        ordem.get("order_status")
-        or ordem.get("webhook_event_type")
-        or dados_kiwify.get("status")
-    )
+            bloco_customer = ordem.get("Customer") or ordem.get("customer") or {}
+            nome = bloco_customer.get("full_name") or bloco_customer.get("name")
+            email = bloco_customer.get("email")
+            telefone = bloco_customer.get("mobile") or bloco_customer.get("phone")
 
-    produto_info = ordem.get("Product") or ordem.get("product") or {}
+            custom_variables = ordem.get("custom_variables") or ordem.get("CustomVariables") or {}
 
-    produto = (
-        produto_info.get("product_name")
-        or produto_info.get("product_offer_name")
-        or ordem.get("product_name")
-        or ordem.get("offer_name")
-    )
+            if isinstance(custom_variables, dict):
+                manychat_user_id = custom_variables.get("manychat_id")
 
-    customer = ordem.get("Customer") or ordem.get("customer") or {}
+        elif carrinho:
+            status = carrinho.get("status")
+            produto = carrinho.get("product_name")
+            nome = carrinho.get("name") or carrinho.get("full_name")
+            email = carrinho.get("email")
+            telefone = carrinho.get("phone") or carrinho.get("mobile")
 
-    nome = (
-        customer.get("full_name")
-        or customer.get("name")
-        or customer.get("first_name")
-    )
+        if not email:
+            email = dados_kiwify.get("email")
 
-    email = customer.get("email")
+        if not nome:
+            nome = dados_kiwify.get("name") or dados_kiwify.get("nome")
 
-    telefone = (
-        customer.get("mobile")
-        or customer.get("phone")
-    )
+        if not telefone:
+            telefone = dados_kiwify.get("phone") or dados_kiwify.get("mobile")
 
-    custom = (
-        ordem.get("custom_variables")
-        or ordem.get("CustomVariables")
-        or {}
-    )
+        telefone = limpar_telefone(telefone)
 
-    if isinstance(custom, dict):
-        manychat_user_id = custom.get("manychat_id")
+        if not email:
+            return {
+                "status": "ignorado",
+                "detalhe": "JSON sem dados de contato acessiveis"
+            }
 
-# ===========================
-# CARRINHO ABANDONADO
-# ===========================
-
-elif isinstance(carrinho, dict) and carrinho:
-
-    status = carrinho.get("status")
-
-    produto = (
-        carrinho.get("product_name")
-        or carrinho.get("offer_name")
-    )
-
-    nome = (
-        carrinho.get("name")
-        or carrinho.get("full_name")
-        or carrinho.get("first_name")
-    )
-
-    email = carrinho.get("email")
-
-    telefone = (
-        carrinho.get("phone")
-        or carrinho.get("mobile")
-    )
-
-# ===========================
-# FALLBACKS
-# ===========================
-
-if not email:
-    email = dados_kiwify.get("email")
-
-if not nome:
-    nome = dados_kiwify.get("name") or dados_kiwify.get("nome")
-
-if not telefone:
-    telefone = dados_kiwify.get("phone") or dados_kiwify.get("mobile")
-
-if not produto:
-    produto = (
-        dados_kiwify.get("product_name")
-        or dados_kiwify.get("offer_name")
-    )
-
-if not status:
-    status = (
-        dados_kiwify.get("status")
-        or dados_kiwify.get("webhook_event_type")
-    )
-
-telefone = limpar_telefone(telefone)
-
-if status:
-    status = str(status).strip().lower()
-
-if produto:
-    produto = str(produto).strip()
-
-if email:
-    email = str(email).strip()
-
-if nome:
-    nome = str(nome).strip()
-
-if not email:
-    return {
-        "status": "ignorado",
-        "detalhe": "JSON sem dados de contato acessiveis",
-        "payload_recebido": dados_kiwify
-    }
+        if status:
+            status = str(status).strip().lower()
 
         payload_supabase = limpar_payload_supabase({
             "nome": nome,
