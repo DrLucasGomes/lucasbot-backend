@@ -245,9 +245,68 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
         telefone = limpar_telefone(telefone)
 
         if not email:
+            fonte_debug = dados_kiwify.get("data") if isinstance(dados_kiwify.get("data"), dict) else dados_kiwify
+
+            ordem_debug = fonte_debug.get("order") or fonte_debug.get("Order") or {}
+            if not isinstance(ordem_debug, dict):
+                ordem_debug = {}
+
+            customer_debug = ordem_debug.get("Customer") or ordem_debug.get("customer") or {}
+            if not isinstance(customer_debug, dict):
+                customer_debug = {}
+
+            product_debug = ordem_debug.get("Product") or ordem_debug.get("product") or {}
+            if not isinstance(product_debug, dict):
+                product_debug = {}
+
+            email = (
+                customer_debug.get("email")
+                or customer_debug.get("Email")
+                or fonte_debug.get("email")
+                or fonte_debug.get("Email")
+            )
+
+            nome = (
+                nome
+                or customer_debug.get("full_name")
+                or customer_debug.get("name")
+                or customer_debug.get("FullName")
+                or fonte_debug.get("full_name")
+                or fonte_debug.get("name")
+                or fonte_debug.get("nome")
+            )
+
+            telefone = (
+                telefone
+                or customer_debug.get("mobile")
+                or customer_debug.get("phone")
+                or customer_debug.get("Mobile")
+                or customer_debug.get("Phone")
+                or fonte_debug.get("mobile")
+                or fonte_debug.get("phone")
+            )
+
+            status = (
+                status
+                or ordem_debug.get("order_status")
+                or ordem_debug.get("status")
+            )
+
+            produto = (
+                produto
+                or product_debug.get("product_name")
+                or product_debug.get("name")
+                or product_debug.get("ProductName")
+            )
+
+            telefone = limpar_telefone(telefone)
+
+        if not email:
             return {
                 "status": "ignorado",
-                "detalhe": "JSON sem dados de contato acessiveis"
+                "detalhe": "JSON sem dados de contato acessiveis",
+                "chaves_recebidas": list(dados_kiwify.keys()),
+                "payload_recebido": dados_kiwify
             }
 
         if status:
