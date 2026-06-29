@@ -6,42 +6,18 @@ app = FastAPI()
 
 URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 
-KEY = os.getenv("SUPABASE_KEY")
-MANYCHAT_TOKEN = os.getenv("MANYCHAT_TOKEN")
-CONVERTKIT_API_KEY = os.getenv("CONVERTKIT_API_KEY")
-TAG_ABANDONO_ID = os.getenv("TAG_ABANDONO_ID")
-TAG_COMPRADOR_ID = os.getenv("TAG_COMPRADOR_ID")
-
 CAMPOS_PERMITIDOS = {
-    "email",
-    "nome",
-    "telefone",
-    "score",
-    "idade",
-    "risco",
-    "status_jornada",
-    "tag",
-    "origem",
-    "campanha",
-    "status_testosterona",
-    "tempo_sintoma",
-    "manychat_id",
-    "status_pagamento",
-    "produto"
+    "email", "nome", "telefone", "score", "idade", "risco",
+    "status_jornada", "tag", "origem", "campanha",
+    "status_testosterona", "tempo_sintoma", "manychat_id",
+    "status_pagamento", "produto"
 }
 
 CAMPOS_NUMERICOS = {"score", "idade"}
 
 
 def valor_valido(v):
-    if v is None:
-        return False
-    texto = str(v).strip()
-    if texto == "":
-        return False
-    if texto.lower() in ["none", "null", "undefined"]:
-        return False
-    return True
+    return v is not None and str(v).strip() != "" and str(v).strip().lower() not in ["none", "null", "undefined"]
 
 
 def limpar_telefone(telefone):
@@ -53,12 +29,8 @@ def limpar_telefone(telefone):
 
 def limpar_payload_supabase(dados):
     limpo = {}
-
     for k, v in dados.items():
-        if k not in CAMPOS_PERMITIDOS:
-            continue
-
-        if not valor_valido(v):
+        if k not in CAMPOS_PERMITIDOS or not valor_valido(v):
             continue
 
         if k in CAMPOS_NUMERICOS:
@@ -66,16 +38,26 @@ def limpar_payload_supabase(dados):
                 limpo[k] = int(str(v).strip())
             except Exception:
                 continue
-
         elif k == "telefone":
             tel = limpar_telefone(v)
             if tel:
                 limpo[k] = tel
-
         else:
             limpo[k] = str(v).strip()
 
     return limpo
+
+
+def obter_headers_supabase(prefer=None):
+    chave = os.getenv("SUPABASE_KEY")
+    headers = {
+        "apikey": chave,
+        "Authorization": f"Bearer {chave}",
+        "Content-Type": "application/json"
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
 
 
 def obter_headers_manychat():
@@ -85,22 +67,9 @@ def obter_headers_manychat():
     }
 
 
-def obter_headers_supabase(prefer=None):
-    chave_atual = os.getenv("SUPABASE_KEY")
-
-    headers = {
-        "apikey": chave_atual,
-        "Authorization": f"Bearer {chave_atual}",
-        "Content-Type": "application/json"
-    }
-
-    if prefer:
-        headers["Prefer"] = prefer
-
-    return headers
-
-
 def resposta_segura(response):
+    if response is None:
+        return None
     try:
         return response.json()
     except Exception:
@@ -108,9 +77,7 @@ def resposta_segura(response):
 
 
 def manychat_id_valido(valor):
-    if not valor_valido(valor):
-        return False
-    return str(valor).strip().lower() not in ["none", "null", "undefined"]
+    return valor_valido(valor)
 
 
 def gerenciar_tags_convertkit(email: str, status_pagamento: str):
@@ -122,22 +89,17 @@ def gerenciar_tags_convertkit(email: str, status_pagamento: str):
 
     status_pagamento = str(status_pagamento).strip().lower()
 
-    is_abandoned = status_pagamento in ["abandoned", "cart_abandoned"]
-    is_approved = status_pagamento in ["paid", "approved", "order_approved"]
-
-    if is_abandoned:
+    if status_pagamento in ["abandoned", "cart_abandoned"]:
         url = f"{base_url}/tags/{os.getenv('TAG_ABANDONO_ID')}/subscribe"
-
         try:
             r = requests.post(url, json=payload, timeout=10)
             print(f"[ConvertKit] Abandono aplicado: {email} | {r.status_code} | {r.text}")
         except Exception as e:
-            print(f"[ConvertKit Erro] Falha ao aplicar abandono: {str(e)}")
+            print(f"[ConvertKit Erro] Abandono: {str(e)}")
 
-    elif is_approved:
+    elif status_pagamento in ["paid", "approved", "order_approved"]:
         url_add = f"{base_url}/tags/{os.getenv('TAG_COMPRADOR_ID')}/subscribe"
         url_remove = f"{base_url}/tags/{os.getenv('TAG_ABANDONO_ID')}/unsubscribe"
-
         try:
             r1 = requests.post(url_add, json=payload, timeout=10)
             print(f"[ConvertKit] Comprador aplicado: {email} | {r1.status_code} | {r1.text}")
@@ -145,9 +107,13 @@ def gerenciar_tags_convertkit(email: str, status_pagamento: str):
             if os.getenv("TAG_ABANDONO_ID"):
                 r2 = requests.post(url_remove, json=payload, timeout=10)
                 print(f"[ConvertKit] Abandono removido: {email} | {r2.status_code} | {r2.text}")
-
         except Exception as e:
-            print(f"[ConvertKit Erro] Falha ao atualizar comprador: {str(e)}")
+            print(f"[ConvertKit Erro] Comprador: {str(e)}")
+
+
+@app.get("/")
+def home():
+    return "LUCASBOT V3 - ONLINE E BLINDADO"
 
 
 @app.post("/webhook")
@@ -156,26 +122,16 @@ async def webhook(request: Request):
         dados_brutos = await request.json()
 
         mc_id = dados_brutos.get("manychat_id")
-
         if not manychat_id_valido(mc_id):
-            return {
-                "status": "erro",
-                "detalhe": "manychat_id nao encontrado"
-            }
+            return {"status": "erro", "detalhe": "manychat_id nao encontrado"}
 
         dados_limpos = limpar_payload_supabase(dados_brutos)
         dados_limpos["manychat_id"] = str(mc_id).strip()
 
-        headers_supabase = obter_headers_supabase(
-            prefer="resolution=merge-duplicates,return=representation"
-        )
-
-        url_upsert = f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id"
-
         response = requests.post(
-            url_upsert,
+            f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id",
             json=dados_limpos,
-            headers=headers_supabase,
+            headers=obter_headers_supabase("resolution=merge-duplicates,return=representation"),
             timeout=15
         )
 
@@ -189,10 +145,7 @@ async def webhook(request: Request):
         }
 
     except Exception as e:
-        return {
-            "status": "erro_critico",
-            "detalhe": str(e)
-        }
+        return {"status": "erro_critico", "detalhe": str(e)}
 
 
 @app.post("/kiwify")
@@ -207,51 +160,106 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
         produto = None
         manychat_user_id = None
 
-        ordem = dados_kiwify.get("order") or dados_kiwify.get("Order")
-        carrinho = dados_kiwify.get("cart") or dados_kiwify.get("Cart")
+        ordem = dados_kiwify.get("order") or dados_kiwify.get("Order") or {}
+        carrinho = dados_kiwify.get("cart") or dados_kiwify.get("Cart") or {}
 
-        if ordem:
-            status = ordem.get("order_status")
+        # ============================================================
+        # COMPRA APROVADA / PEDIDO REAL DA KIWIFY
+        # ============================================================
+
+        if isinstance(ordem, dict) and ordem:
+            status = (
+                ordem.get("order_status")
+                or ordem.get("webhook_event_type")
+                or dados_kiwify.get("status")
+            )
 
             bloco_produto = ordem.get("Product") or ordem.get("product") or {}
-            produto = bloco_produto.get("product_name")
+            produto = (
+                bloco_produto.get("product_name")
+                or bloco_produto.get("product_offer_name")
+                or ordem.get("product_name")
+                or ordem.get("offer_name")
+            )
 
             bloco_customer = ordem.get("Customer") or ordem.get("customer") or {}
-            nome = bloco_customer.get("full_name") or bloco_customer.get("name")
+            nome = (
+                bloco_customer.get("full_name")
+                or bloco_customer.get("name")
+                or bloco_customer.get("first_name")
+            )
             email = bloco_customer.get("email")
             telefone = bloco_customer.get("mobile") or bloco_customer.get("phone")
 
-            custom_variables = ordem.get("custom_variables") or ordem.get("CustomVariables") or {}
+            custom_variables = (
+                ordem.get("custom_variables")
+                or ordem.get("CustomVariables")
+                or {}
+            )
+
+            tracking = ordem.get("TrackingParameters") or ordem.get("tracking_parameters") or {}
 
             if isinstance(custom_variables, dict):
                 manychat_user_id = custom_variables.get("manychat_id")
 
-        elif carrinho:
+            if not manychat_user_id and isinstance(tracking, dict):
+                manychat_user_id = (
+                    tracking.get("manychat_id")
+                    or tracking.get("s1")
+                    or tracking.get("s2")
+                    or tracking.get("s3")
+                )
+
+        # ============================================================
+        # CARRINHO ABANDONADO REAL DA KIWIFY
+        # ============================================================
+
+        elif isinstance(carrinho, dict) and carrinho:
             status = carrinho.get("status")
-            produto = carrinho.get("product_name")
-            nome = carrinho.get("name") or carrinho.get("full_name")
+            produto = carrinho.get("product_name") or carrinho.get("offer_name")
+            nome = carrinho.get("name") or carrinho.get("full_name") or carrinho.get("first_name")
             email = carrinho.get("email")
             telefone = carrinho.get("phone") or carrinho.get("mobile")
 
-        if not email:
+        # ============================================================
+        # FALLBACK GERAL
+        # ============================================================
+
+        if not valor_valido(email):
             email = dados_kiwify.get("email")
 
-        if not nome:
+        if not valor_valido(nome):
             nome = dados_kiwify.get("name") or dados_kiwify.get("nome")
 
-        if not telefone:
+        if not valor_valido(telefone):
             telefone = dados_kiwify.get("phone") or dados_kiwify.get("mobile")
+
+        if not valor_valido(produto):
+            produto = dados_kiwify.get("product_name") or dados_kiwify.get("offer_name")
+
+        if not valor_valido(status):
+            status = dados_kiwify.get("status") or dados_kiwify.get("webhook_event_type")
 
         telefone = limpar_telefone(telefone)
 
-        if not email:
+        if valor_valido(status):
+            status = str(status).strip().lower()
+
+        if valor_valido(email):
+            email = str(email).strip()
+
+        if valor_valido(nome):
+            nome = str(nome).strip()
+
+        if valor_valido(produto):
+            produto = str(produto).strip()
+
+        if not valor_valido(email):
             return {
                 "status": "ignorado",
-                "detalhe": "JSON sem dados de contato acessiveis"
+                "detalhe": "JSON sem dados de contato acessiveis",
+                "payload_recebido": dados_kiwify
             }
-
-        if status:
-            status = str(status).strip().lower()
 
         payload_supabase = limpar_payload_supabase({
             "nome": nome,
@@ -261,26 +269,27 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
             "produto": produto
         })
 
-        headers_supabase_padrao = obter_headers_supabase(prefer="return=representation")
-        headers_supabase_upsert = obter_headers_supabase(
-            prefer="resolution=merge-duplicates,return=representation"
-        )
+        headers_padrao = obter_headers_supabase("return=representation")
+        headers_upsert = obter_headers_supabase("resolution=merge-duplicates,return=representation")
 
         supabase_acao = None
         supabase_code = None
         supabase_resposta = None
         manychat_id_para_tag = None
 
+        # ============================================================
+        # SALVAR NO SUPABASE
+        # ============================================================
+
         if manychat_id_valido(manychat_user_id):
             manychat_user_id = str(manychat_user_id).strip()
             manychat_id_para_tag = manychat_user_id
-
             payload_supabase["manychat_id"] = manychat_user_id
 
             response_supabase = requests.post(
                 f"{URL}/rest/v1/leads_vigor?on_conflict=manychat_id",
                 json=payload_supabase,
-                headers=headers_supabase_upsert,
+                headers=headers_upsert,
                 timeout=15
             )
 
@@ -301,7 +310,6 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                     headers=obter_headers_supabase(),
                     timeout=15
                 )
-
                 if busca_tel.status_code == 200:
                     leads = busca_tel.json()
                     if isinstance(leads, list) and len(leads) > 0:
@@ -317,7 +325,6 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                     headers=obter_headers_supabase(),
                     timeout=15
                 )
-
                 if busca_email.status_code == 200:
                     leads = busca_email.json()
                     if isinstance(leads, list) and len(leads) > 0:
@@ -334,7 +341,7 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                     f"{URL}/rest/v1/leads_vigor",
                     params={"id": f"eq.{lead_id}"},
                     json=payload_supabase,
-                    headers=headers_supabase_padrao,
+                    headers=headers_padrao,
                     timeout=15
                 )
 
@@ -346,7 +353,7 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                 response_insert = requests.post(
                     f"{URL}/rest/v1/leads_vigor",
                     json=payload_supabase,
-                    headers=headers_supabase_padrao,
+                    headers=headers_padrao,
                     timeout=15
                 )
 
@@ -354,24 +361,28 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                 supabase_code = response_insert.status_code
                 supabase_resposta = resposta_segura(response_insert)
 
+        # ============================================================
+        # CONVERTKIT
+        # ============================================================
+
         if email and status:
             background_tasks.add_task(gerenciar_tags_convertkit, email, status)
+
+        # ============================================================
+        # MANYCHAT PARA COMPRADOR
+        # ============================================================
 
         if status in ["paid", "approved", "order_approved"]:
             headers_mc = obter_headers_manychat()
 
             if manychat_id_valido(manychat_id_para_tag):
                 try:
-                    tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
-
-                    payload_tag = {
-                        "subscriber_id": int(str(manychat_id_para_tag).strip()),
-                        "tag_name": "comprou-vigor360"
-                    }
-
                     res_tag = requests.post(
-                        tag_url,
-                        json=payload_tag,
+                        "https://api.manychat.com/fb/subscriber/addTagByName",
+                        json={
+                            "subscriber_id": int(str(manychat_id_para_tag).strip()),
+                            "tag_name": "comprou-vigor360"
+                        },
                         headers=headers_mc,
                         timeout=15
                     )
@@ -392,80 +403,6 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                 except Exception as e:
                     print(f"[ManyChat] Falha tag ID direto: {str(e)}")
 
-            subscriber_data = []
-            find_res = None
-
-            if os.getenv("MANYCHAT_TOKEN"):
-                payload_busca = {
-                    "field_name": "email",
-                    "field_value": email
-                }
-
-                find_res = requests.post(
-                    "https://api.manychat.com/fb/subscriber/findByCustomField",
-                    json=payload_busca,
-                    headers=headers_mc,
-                    timeout=15
-                )
-
-                try:
-                    subscriber_data = find_res.json().get("data", [])
-                except Exception:
-                    subscriber_data = []
-
-                if not subscriber_data and telefone:
-                    find_res = requests.get(
-                        "https://api.manychat.com/fb/subscriber/findByName",
-                        params={"name": telefone},
-                        headers=headers_mc,
-                        timeout=15
-                    )
-
-                    try:
-                        dados_find = find_res.json()
-
-                        if isinstance(dados_find, dict) and "data" in dados_find:
-                            subscriber_data = dados_find.get("data", [])
-                        elif isinstance(dados_find, dict):
-                            subscriber_data = [dados_find]
-                        else:
-                            subscriber_data = []
-
-                    except Exception:
-                        subscriber_data = []
-
-                if subscriber_data and isinstance(subscriber_data, list) and len(subscriber_data) > 0:
-                    user_info = subscriber_data[0]
-                    uid = user_info.get("id")
-
-                    if uid:
-                        tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
-
-                        payload_tag = {
-                            "subscriber_id": int(uid),
-                            "tag_name": "comprou-vigor360"
-                        }
-
-                        res_tag = requests.post(
-                            tag_url,
-                            json=payload_tag,
-                            headers=headers_mc,
-                            timeout=15
-                        )
-
-                        return {
-                            "status": "sucesso_funil_busca",
-                            "status_pagamento": status,
-                            "email": email,
-                            "telefone": telefone,
-                            "manychat_id_encontrado": uid,
-                            "supabase_acao": supabase_acao,
-                            "supabase_code": supabase_code,
-                            "supabase_resposta": supabase_resposta,
-                            "manychat_code": res_tag.status_code,
-                            "manychat_resposta": resposta_segura(res_tag)
-                        }
-
             return {
                 "status": "comprador_salvo_mas_nao_encontrado_no_manychat",
                 "status_pagamento": status,
@@ -473,9 +410,7 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                 "telefone": telefone,
                 "supabase_acao": supabase_acao,
                 "supabase_code": supabase_code,
-                "supabase_resposta": supabase_resposta,
-                "manychat_find_code": find_res.status_code if find_res else None,
-                "manychat_find_resposta": resposta_segura(find_res) if find_res else None
+                "supabase_resposta": supabase_resposta
             }
 
         return {
@@ -483,18 +418,11 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
             "status_pagamento": status,
             "email": email,
             "telefone": telefone,
+            "produto": produto,
             "supabase_acao": supabase_acao,
             "supabase_code": supabase_code,
             "supabase_resposta": supabase_resposta
         }
 
     except Exception as e:
-        return {
-            "status": "erro_critico",
-            "detalhe": str(e)
-        }
-
-
-@app.get("/")
-def home():
-    return "LUCASBOT V3 - ONLINE E BLINDADO"
+        return {"status": "erro_critico", "detalhe": str(e)}
