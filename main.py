@@ -1,25 +1,72 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 import requests
 import os
 
 app = FastAPI()
 
 URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
+
+# =====================================================================
+# EXTRAÇÃO DE CHAVES DAS VARIÁVEIS DE AMBIENTE (RENDER)
+# =====================================================================
 KEY = os.getenv("SUPABASE_KEY") 
+MANYCHAT_TOKEN = os.getenv("MANYCHAT_TOKEN")
+CONVERTKIT_API_KEY = os.getenv("CONVERTKIT_API_KEY")
+TAG_ABANDONO_ID = os.getenv("TAG_ABANDONO_ID")     
+TAG_COMPRADOR_ID = os.getenv("TAG_COMPRADOR_ID") 
 
-# TOKEN DA API PÚBLICA DO MANYCHAT
-MANYCHAT_TOKEN = "3921505:a4bbd6f7301c5fd1cc27d876f762d0bf"
+def obter_headers_manychat():
+    return {
+        "Authorization": f"Bearer {os.getenv('MANYCHAT_TOKEN')}",
+        "Content-Type": "application/json"
+    }
 
-headers_manychat = {
-    "Authorization": f"Bearer {MANYCHAT_TOKEN}",
-    "Content-Type": "application/json"
-}
+def obter_headers_supabase():
+    chave_atual = os.getenv("SUPABASE_KEY")
+    return {
+        "apikey": chave_atual, 
+        "Authorization": f"Bearer {chave_atual}", 
+        "Content-Type": "application/json"
+    }
 
-headers_supabase_padrao = {
-    "apikey": KEY, 
-    "Authorization": f"Bearer {KEY}", 
-    "Content-Type": "application/json"
-}
+# =====================================================================
+# CONFIGURAÇÃO CONVERTKIT - SEQUÊNCIA SELL LIKE A CRAZY
+# =====================================================================
+def gerenciar_tags_convertkit(email: str, status_pagamento: str):
+    """
+    Controla o fluxo do ConvertKit em segundo plano.
+    Aplica tag de abandono ou remove para parar os e-mails de cobrança caso pague.
+    """
+    base_url = "https://api.convertkit.com/v3"
+    payload = {"api_key": os.getenv("CONVERTKIT_API_KEY"), "email": email}
+    
+    # Identifica se é abandono ou aprovado
+    is_abandoned = status_pagamento in ["abandoned", "cart_abandoned"]
+    is_approved = status_pagamento in ["paid", "approved", "order_approved"]
+    
+    if is_abandoned:
+        url = f"{base_url}/tags/{os.getenv('TAG_ABANDONO_ID')}/subscribe"
+        try:
+            requests.post(url, json=payload, timeout=10)
+            print(f"[ConvertKit] Tag de Abandono aplicada para o e-mail: {email}")
+        except Exception as e:
+            print(f"[ConvertKit Erro] Falha ao aplicar tag de abandono: {str(e)}")
+            
+    elif is_approved:
+        url_add = f"{base_url}/tags/{os.getenv('TAG_COMPRADOR_ID')}/subscribe"
+        url_remove = f"{base_url}/tags/{os.getenv('TAG_ABANDONO_ID')}/unsubscribe"
+        try:
+            # Adiciona a tag de comprador do Protocolo Vigor 360
+            requests.post(url_add, json=payload, timeout=10)
+            # Remove a tag de abandono de forma imediata (Morte Súbita da cobrança)
+            requests.post(url_remove, json=payload, timeout=10)
+            print(f"[ConvertKit] Lead {email} movido para a lista de Compradores.")
+        except Exception as e:
+            print(f"[ConvertKit Erro] Falha ao atualizar tags de comprador: {str(e)}")
+
+# =====================================================================
+# ROTAS DO SERVIDOR
+# =====================================================================
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -39,9 +86,10 @@ async def webhook(request: Request):
 
         dados_limpos["manychat_id"] = mc_id_str
 
+        chave_atual = os.getenv("SUPABASE_KEY")
         headers_supabase = {
-            "apikey": KEY, 
-            "Authorization": f"Bearer {KEY}", 
+            "apikey": chave_atual, 
+            "Authorization": f"Bearer {chave_atual}", 
             "Content-Type": "application/json",
             "Prefer": "resolution=merge-duplicates"
         }
@@ -54,7 +102,7 @@ async def webhook(request: Request):
         return {"status": "erro", "detalhe": str(e)}
 
 @app.post("/kiwify")
-async def webhook_kiwify(request: Request):
+async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
     try:
         dados_kiwify = await request.json()
         
@@ -118,12 +166,14 @@ async def webhook_kiwify(request: Request):
 
         # 3. UNIFICAÇÃO NA MESMA LINHA DO SUPABASE
         lead_encontrado_por_telefone = False
+        headers_supabase_padrao = obter_headers_supabase()
         
         if manychat_user_id and str(manychat_user_id).strip() != "" and str(manychat_user_id).lower() != "none":
             payload_supabase["manychat_id"] = str(manychat_user_id).strip()
+            chave_atual = os.getenv("SUPABASE_KEY")
             headers_upsert = {
-                "apikey": KEY, 
-                "Authorization": f"Bearer {KEY}", 
+                "apikey": chave_atual, 
+                "Authorization": f"Bearer {chave_atual}", 
                 "Content-Type": "application/json",
                 "Prefer": "resolution=merge-duplicates"
             }
@@ -150,20 +200,27 @@ async def webhook_kiwify(request: Request):
         if not manychat_user_id and not lead_encontrado_por_telefone:
             requests.post(f"{URL}/rest/v1/leads_vigor", json=payload_supabase, headers=headers_supabase_padrao)
 
+        # -----------------------------------------------------------------
+        # DISPARO DO CONVERTKIT (Executa em segundo plano sem atrasar a Kiwify)
+        # -----------------------------------------------------------------
+        if email and status:
+            background_tasks.add_task(gerenciar_tags_convertkit, email, status)
+
         # 4. ENTREGA DE TAGS NO MANYCHAT PARA PEDIDOS PAGOS
         if status in ["paid", "approved", "order_approved"]:
+            headers_mc = obter_headers_manychat()
             if manychat_user_id:
                 tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                 payload_tag = {"subscriber_id": int(manychat_user_id), "tag_name": "comprou-vigor360"}
-                res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
+                res_tag = requests.post(tag_url, json=payload_tag, headers=headers_mc)
                 return {"status": "sucesso_id_direto", "manychat_code": res_tag.status_code}
 
             payload_busca = {"field_name": "email", "field_value": email}
-            find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=payload_busca, headers=headers_manychat)
+            find_res = requests.post("https://api.manychat.com/fb/subscriber/findByCustomField", json=payload_busca, headers=headers_mc)
             subscriber_data = find_res.json().get("data", [])
 
             if not subscriber_data and telefone:
-                find_res = requests.get(f"https://api.manychat.com/fb/subscriber/findByName?name={telefone}", headers=headers_manychat)
+                find_res = requests.get(f"https://api.manychat.com/fb/subscriber/findByName?name={telefone}", headers=headers_mc)
                 subscriber_data = find_res.json().get("data", []) if "data" in find_res.json() else [find_res.json()]
 
             if subscriber_data and isinstance(subscriber_data, list) and len(subscriber_data) > 0:
@@ -172,7 +229,7 @@ async def webhook_kiwify(request: Request):
                 if uid:
                     tag_url = "https://api.manychat.com/fb/subscriber/addTagByName"
                     payload_tag = {"subscriber_id": int(uid), "tag_name": "comprou-vigor360"}
-                    res_tag = requests.post(tag_url, json=payload_tag, headers=headers_manychat)
+                    res_tag = requests.post(tag_url, json=payload_tag, headers=headers_mc)
                     return {"status": "sucesso_funil_busca", "manychat_code": res_tag.status_code}
             
             return {"status": "comprador_salvo_mas_nao_encontrado_no_manychat"}
