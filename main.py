@@ -16,6 +16,8 @@ CAMPOS_PERMITIDOS = {
     "email",
     "nome",
     "telefone",
+    "telefone_whatsapp",
+    "telefone_checkout_kiwify",
     "score",
     "idade",
     "risco",
@@ -32,22 +34,38 @@ CAMPOS_PERMITIDOS = {
 
 CAMPOS_NUMERICOS = {"score", "idade"}
 
+CAMPOS_TELEFONE = {
+    "telefone",
+    "telefone_whatsapp",
+    "telefone_checkout_kiwify"
+}
+
 
 def valor_valido(v):
     if v is None:
         return False
+
     texto = str(v).strip()
+
     if texto == "":
         return False
+
     if texto.lower() in ["none", "null", "undefined"]:
         return False
+
+    # Evita gravar placeholders quebrados do ManyChat, como {{cuf_14421642}}
+    if texto.startswith("{{") or texto.endswith("}}") or "{{" in texto or "}}" in texto:
+        return False
+
     return True
 
 
 def limpar_telefone(telefone):
     if not valor_valido(telefone):
         return None
+
     tel = "".join(filter(str.isdigit, str(telefone)))
+
     return tel if tel else None
 
 
@@ -67,7 +85,7 @@ def limpar_payload_supabase(dados):
             except Exception:
                 continue
 
-        elif k == "telefone":
+        elif k in CAMPOS_TELEFONE:
             tel = limpar_telefone(v)
             if tel:
                 limpo[k] = tel
@@ -110,6 +128,7 @@ def resposta_segura(response):
 def manychat_id_valido(valor):
     if not valor_valido(valor):
         return False
+
     return str(valor).strip().lower() not in ["none", "null", "undefined"]
 
 
@@ -148,6 +167,28 @@ def gerenciar_tags_convertkit(email: str, status_pagamento: str):
 
         except Exception as e:
             print(f"[ConvertKit Erro] Falha ao atualizar comprador: {str(e)}")
+
+
+def buscar_lead_por_campo(campo: str, valor: str):
+    if not valor_valido(valor):
+        return None
+
+    busca = requests.get(
+        f"{URL}/rest/v1/leads_vigor",
+        params={
+            campo: f"eq.{valor}",
+            "select": "id,email,telefone,telefone_whatsapp,telefone_checkout_kiwify,manychat_id"
+        },
+        headers=obter_headers_supabase(),
+        timeout=15
+    )
+
+    if busca.status_code == 200:
+        leads = busca.json()
+        if isinstance(leads, list) and len(leads) > 0:
+            return leads[0]
+
+    return None
 
 
 @app.post("/webhook")
@@ -327,6 +368,7 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
             "nome": nome,
             "email": email,
             "telefone": telefone,
+            "telefone_checkout_kiwify": telefone,
             "status_pagamento": status,
             "produto": produto
         })
@@ -362,36 +404,16 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
             lead_existente = None
 
             if telefone:
-                busca_tel = requests.get(
-                    f"{URL}/rest/v1/leads_vigor",
-                    params={
-                        "telefone": f"eq.{telefone}",
-                        "select": "id,email,telefone,manychat_id"
-                    },
-                    headers=obter_headers_supabase(),
-                    timeout=15
-                )
+                lead_existente = buscar_lead_por_campo("telefone", telefone)
 
-                if busca_tel.status_code == 200:
-                    leads = busca_tel.json()
-                    if isinstance(leads, list) and len(leads) > 0:
-                        lead_existente = leads[0]
+            if not lead_existente and telefone:
+                lead_existente = buscar_lead_por_campo("telefone_whatsapp", telefone)
+
+            if not lead_existente and telefone:
+                lead_existente = buscar_lead_por_campo("telefone_checkout_kiwify", telefone)
 
             if not lead_existente and email:
-                busca_email = requests.get(
-                    f"{URL}/rest/v1/leads_vigor",
-                    params={
-                        "email": f"eq.{email}",
-                        "select": "id,email,telefone,manychat_id"
-                    },
-                    headers=obter_headers_supabase(),
-                    timeout=15
-                )
-
-                if busca_email.status_code == 200:
-                    leads = busca_email.json()
-                    if isinstance(leads, list) and len(leads) > 0:
-                        lead_existente = leads[0]
+                lead_existente = buscar_lead_por_campo("email", email)
 
             if lead_existente:
                 lead_id = lead_existente.get("id")
@@ -408,7 +430,7 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                     timeout=15
                 )
 
-                supabase_acao = "patch_por_telefone_ou_email"
+                supabase_acao = "patch_por_telefone_whatsapp_checkout_ou_email"
                 supabase_code = response_patch.status_code
                 supabase_resposta = resposta_segura(response_patch)
 
@@ -567,4 +589,4 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
 
 @app.get("/")
 def home():
-    return "LUCASBOT V3 - ONLINE E BLINDADO"
+    return "LUCASBOT V3 - ONLINE E BLINDADO COM TELEFONE WHATSAPP E CHECKOUT"
