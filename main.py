@@ -9,6 +9,7 @@ URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 KEY = os.getenv("SUPABASE_KEY")
 MANYCHAT_TOKEN = os.getenv("MANYCHAT_TOKEN")
 CONVERTKIT_API_KEY = os.getenv("CONVERTKIT_API_KEY")
+TAG_LEAD_ID = os.getenv("TAG_LEAD_ID")
 TAG_ABANDONO_ID = os.getenv("TAG_ABANDONO_ID")
 TAG_COMPRADOR_ID = os.getenv("TAG_COMPRADOR_ID")
 
@@ -132,6 +133,40 @@ def manychat_id_valido(valor):
     return str(valor).strip().lower() not in ["none", "null", "undefined"]
 
 
+
+def adicionar_lead_convertkit(email: str):
+    """
+    Adiciona lead comum vindo do ManyChat na tag TAG_LEAD_ID do ConvertKit/Kit.
+    Esta função é chamada pelo /webhook quando o ManyChat envia um email.
+    """
+    if not valor_valido(email):
+        print("[ConvertKit Lead] Email invalido ou vazio")
+        return
+
+    api_key = os.getenv("CONVERTKIT_API_KEY")
+    tag_lead_id = os.getenv("TAG_LEAD_ID")
+
+    if not valor_valido(api_key):
+        print("[ConvertKit Lead] CONVERTKIT_API_KEY ausente")
+        return
+
+    if not valor_valido(tag_lead_id):
+        print("[ConvertKit Lead] TAG_LEAD_ID ausente")
+        return
+
+    url = f"https://api.convertkit.com/v3/tags/{tag_lead_id}/subscribe"
+
+    payload = {
+        "api_key": api_key,
+        "email": str(email).strip()
+    }
+
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        print(f"[ConvertKit Lead] Lead aplicado: {email} | {r.status_code} | {r.text}")
+    except Exception as e:
+        print(f"[ConvertKit Lead Erro] Falha ao aplicar lead: {str(e)}")
+
 def gerenciar_tags_convertkit(email: str, status_pagamento: str):
     base_url = "https://api.convertkit.com/v3"
     payload = {
@@ -192,7 +227,7 @@ def buscar_lead_por_campo(campo: str, valor: str):
 
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         dados_brutos = await request.json()
 
@@ -222,10 +257,18 @@ async def webhook(request: Request):
 
         sucesso = response.status_code in [200, 201, 204]
 
+        email_lead = dados_limpos.get("email")
+
+        # Novo: se o ManyChat mandou email, adiciona o lead na tag TAG_LEAD_ID do ConvertKit.
+        # Roda em background para não atrasar nem quebrar a resposta do ManyChat.
+        if sucesso and valor_valido(email_lead):
+            background_tasks.add_task(adicionar_lead_convertkit, email_lead)
+
         return {
             "status": "sucesso" if sucesso else "erro_supabase",
             "code": response.status_code,
             "payload_enviado": dados_limpos,
+            "convertkit_lead_agendado": bool(sucesso and valor_valido(email_lead)),
             "resposta_supabase": resposta_segura(response)
         }
 
@@ -589,4 +632,4 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
 
 @app.get("/")
 def home():
-    return "LUCASBOT V3 - ONLINE E BLINDADO COM TELEFONE WHATSAPP E CHECKOUT"
+    return "LUCASBOT V3 - ONLINE COM MANYCHAT, SUPABASE, KIWIFY E CONVERTKIT LEADS"
