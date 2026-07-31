@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, BackgroundTasks
 import requests
 import os
+from urllib.parse import urlparse, parse_qs
 
 app = FastAPI()
 
@@ -30,7 +31,14 @@ CAMPOS_PERMITIDOS = {
     "tempo_sintoma",
     "manychat_id",
     "status_pagamento",
-    "produto"
+    "produto",
+    "checkout_src",
+    "checkout_utm_source",
+    "checkout_utm_medium",
+    "checkout_utm_campaign",
+    "checkout_utm_content",
+    "checkout_utm_term",
+    "origem_compra"
 }
 
 CAMPOS_NUMERICOS = {"score", "idade"}
@@ -131,6 +139,134 @@ def manychat_id_valido(valor):
         return False
 
     return str(valor).strip().lower() not in ["none", "null", "undefined"]
+
+
+def buscar_valor_recursivo(objeto, chaves_possiveis):
+    """
+    Procura uma chave em qualquer nível do JSON.
+    Isso deixa o parser resistente, porque a Kiwify pode mandar src/UTM em blocos diferentes.
+    """
+    chaves_normalizadas = {str(chave).lower() for chave in chaves_possiveis}
+
+    if isinstance(objeto, dict):
+        for chave, valor in objeto.items():
+            if str(chave).lower() in chaves_normalizadas and valor_valido(valor):
+                return valor
+
+        for valor in objeto.values():
+            resultado = buscar_valor_recursivo(valor, chaves_normalizadas)
+            if valor_valido(resultado):
+                return resultado
+
+    elif isinstance(objeto, list):
+        for item in objeto:
+            resultado = buscar_valor_recursivo(item, chaves_normalizadas)
+            if valor_valido(resultado):
+                return resultado
+
+    return None
+
+
+def buscar_parametro_em_urls(objeto, parametro):
+    """
+    Procura uma URL dentro do JSON e tenta extrair parâmetro de query string.
+    Exemplo: payment_url contendo ?src=facebook_direto&utm_source=facebook
+    """
+    if isinstance(objeto, dict):
+        for valor in objeto.values():
+            resultado = buscar_parametro_em_urls(valor, parametro)
+            if valor_valido(resultado):
+                return resultado
+
+    elif isinstance(objeto, list):
+        for item in objeto:
+            resultado = buscar_parametro_em_urls(item, parametro)
+            if valor_valido(resultado):
+                return resultado
+
+    elif isinstance(objeto, str):
+        texto = objeto.strip()
+
+        if "?" in texto and parametro in texto:
+            try:
+                parsed = urlparse(texto)
+                query = parse_qs(parsed.query)
+                valores = query.get(parametro)
+                if valores and valor_valido(valores[0]):
+                    return valores[0]
+            except Exception:
+                return None
+
+    return None
+
+
+def extrair_tracking_kiwify(dados_kiwify):
+    """
+    Extrai src e UTMs do webhook da Kiwify.
+    Primeiro tenta por chave direta/recursiva; depois tenta achar dentro de URLs do payload.
+    """
+    src = buscar_valor_recursivo(dados_kiwify, ["src", "sck", "source"])
+    utm_source = buscar_valor_recursivo(dados_kiwify, ["utm_source"])
+    utm_medium = buscar_valor_recursivo(dados_kiwify, ["utm_medium"])
+    utm_campaign = buscar_valor_recursivo(dados_kiwify, ["utm_campaign"])
+    utm_content = buscar_valor_recursivo(dados_kiwify, ["utm_content"])
+    utm_term = buscar_valor_recursivo(dados_kiwify, ["utm_term"])
+
+    if not valor_valido(src):
+        src = buscar_parametro_em_urls(dados_kiwify, "src")
+    if not valor_valido(utm_source):
+        utm_source = buscar_parametro_em_urls(dados_kiwify, "utm_source")
+    if not valor_valido(utm_medium):
+        utm_medium = buscar_parametro_em_urls(dados_kiwify, "utm_medium")
+    if not valor_valido(utm_campaign):
+        utm_campaign = buscar_parametro_em_urls(dados_kiwify, "utm_campaign")
+    if not valor_valido(utm_content):
+        utm_content = buscar_parametro_em_urls(dados_kiwify, "utm_content")
+    if not valor_valido(utm_term):
+        utm_term = buscar_parametro_em_urls(dados_kiwify, "utm_term")
+
+    return {
+        "checkout_src": src,
+        "checkout_utm_source": utm_source,
+        "checkout_utm_medium": utm_medium,
+        "checkout_utm_campaign": utm_campaign,
+        "checkout_utm_content": utm_content,
+        "checkout_utm_term": utm_term
+    }
+
+
+def extrair_manychat_id_do_src(src):
+    if not valor_valido(src):
+        return None
+
+    texto = str(src).strip()
+
+    if texto.startswith("mc_"):
+        candidato = texto.replace("mc_", "", 1).strip()
+        if manychat_id_valido(candidato):
+            return candidato
+
+    return None
+
+
+def classificar_origem_compra(src, utm_source):
+    src_txt = str(src).strip().lower() if valor_valido(src) else ""
+    utm_txt = str(utm_source).strip().lower() if valor_valido(utm_source) else ""
+
+    if src_txt.startswith("mc_") or utm_txt == "manychat":
+        return "manychat"
+    if "youtube" in src_txt or utm_txt == "youtube":
+        return "youtube_direto"
+    if "facebook" in src_txt or utm_txt == "facebook" or "meta" in src_txt or utm_txt == "meta":
+        return "facebook_direto"
+    if "instagram" in src_txt or utm_txt == "instagram":
+        return "instagram_direto"
+    if "vsl" in src_txt or "pagina" in src_txt or utm_txt in ["pagina_vendas", "site"]:
+        return "pagina_vendas"
+    if src_txt or utm_txt:
+        return "rastreado_outro"
+
+    return "desconhecida"
 
 
 
@@ -291,6 +427,11 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
         produto = None
         manychat_user_id = None
 
+        tracking = extrair_tracking_kiwify(dados_kiwify)
+        checkout_src = tracking.get("checkout_src")
+        checkout_utm_source = tracking.get("checkout_utm_source")
+        origem_compra = classificar_origem_compra(checkout_src, checkout_utm_source)
+
         ordem = dados_kiwify.get("order") or dados_kiwify.get("Order")
         carrinho = dados_kiwify.get("cart") or dados_kiwify.get("Cart")
 
@@ -316,6 +457,16 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
             nome = carrinho.get("name") or carrinho.get("full_name")
             email = carrinho.get("email")
             telefone = carrinho.get("phone") or carrinho.get("mobile")
+
+            custom_variables = carrinho.get("custom_variables") or carrinho.get("CustomVariables") or {}
+
+            if isinstance(custom_variables, dict):
+                manychat_user_id = custom_variables.get("manychat_id")
+
+        # Se veio src=mc_123456, usa isso como manychat_id quando a Kiwify não mandar custom_variables.
+        manychat_id_do_src = extrair_manychat_id_do_src(checkout_src)
+        if not manychat_id_valido(manychat_user_id) and manychat_id_valido(manychat_id_do_src):
+            manychat_user_id = manychat_id_do_src
 
         if not email:
             email = dados_kiwify.get("email")
@@ -401,6 +552,8 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                 "status": "ignorado",
                 "detalhe": "JSON sem dados de contato acessiveis",
                 "chaves_recebidas": list(dados_kiwify.keys()),
+                "tracking_detectado": tracking,
+                "origem_compra": origem_compra,
                 "payload_recebido": dados_kiwify
             }
 
@@ -413,7 +566,14 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
             "telefone": telefone,
             "telefone_checkout_kiwify": telefone,
             "status_pagamento": status,
-            "produto": produto
+            "produto": produto,
+            "checkout_src": tracking.get("checkout_src"),
+            "checkout_utm_source": tracking.get("checkout_utm_source"),
+            "checkout_utm_medium": tracking.get("checkout_utm_medium"),
+            "checkout_utm_campaign": tracking.get("checkout_utm_campaign"),
+            "checkout_utm_content": tracking.get("checkout_utm_content"),
+            "checkout_utm_term": tracking.get("checkout_utm_term"),
+            "origem_compra": origem_compra
         })
 
         headers_supabase_padrao = obter_headers_supabase(prefer="return=representation")
@@ -517,6 +677,8 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                         "email": email,
                         "telefone": telefone,
                         "manychat_id_usado": manychat_id_para_tag,
+                        "tracking_detectado": tracking,
+                        "origem_compra": origem_compra,
                         "supabase_acao": supabase_acao,
                         "supabase_code": supabase_code,
                         "supabase_resposta": supabase_resposta,
@@ -594,6 +756,8 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                             "email": email,
                             "telefone": telefone,
                             "manychat_id_encontrado": uid,
+                            "tracking_detectado": tracking,
+                            "origem_compra": origem_compra,
                             "supabase_acao": supabase_acao,
                             "supabase_code": supabase_code,
                             "supabase_resposta": supabase_resposta,
@@ -606,6 +770,8 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
                 "status_pagamento": status,
                 "email": email,
                 "telefone": telefone,
+                "tracking_detectado": tracking,
+                "origem_compra": origem_compra,
                 "supabase_acao": supabase_acao,
                 "supabase_code": supabase_code,
                 "supabase_resposta": supabase_resposta,
@@ -632,4 +798,4 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
 
 @app.get("/")
 def home():
-    return "LUCASBOT V3 - ONLINE COM MANYCHAT, SUPABASE, KIWIFY E CONVERTKIT LEADS"
+    return "LUCASBOT V3 - ONLINE COM RASTREAMENTO DE COMPRA"
