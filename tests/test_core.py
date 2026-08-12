@@ -1,4 +1,12 @@
+import sys
+from pathlib import Path
+
 import pytest
+
+# Garante que a raiz do repositorio (onde esta main.py) esteja no sys.path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import main
 
