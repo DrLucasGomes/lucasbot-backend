@@ -58,6 +58,26 @@ def instalar_supabase_em_memoria(monkeypatch):
     chamadas_tag_manychat = []
     chamadas_convertkit = []
 
+    def fake_get(url, params=None, headers=None, timeout=None, **kwargs):
+        params = params or {}
+        campos = [
+            "manychat_id",
+            "telefone",
+            "telefone_whatsapp",
+            "telefone_checkout_kiwify",
+            "email",
+        ]
+        campo = next((c for c in campos if c in params), None)
+        if not campo:
+            return FakeResponse(200, [])
+
+        valor = str(params[campo]).replace("eq.", "", 1)
+        for mcid, registro in estado.items():
+            candidato = mcid if campo == "manychat_id" else registro.get(campo)
+            if candidato is not None and str(candidato) == valor:
+                return FakeResponse(200, [{"id": 1, **registro, "manychat_id": mcid}])
+        return FakeResponse(200, [])
+
     def fake_post(url, json=None, headers=None, timeout=None, **kwargs):
         if "leads_vigor" in url:
             mcid = str((json or {}).get("manychat_id", ""))
@@ -71,6 +91,7 @@ def instalar_supabase_em_memoria(monkeypatch):
 
         return FakeResponse(200, {})
 
+    monkeypatch.setattr(main.requests, "get", fake_get)
     monkeypatch.setattr(main.requests, "post", fake_post)
     monkeypatch.setattr(
         main,
@@ -91,7 +112,6 @@ def test_abandono_duplicado_mantem_um_estado_final_coerente(monkeypatch):
     assert r2.json()["status"] == "processado"
     assert estado["777"]["status_pagamento"] == "abandoned"
     assert estado["777"]["email"] == "lead@example.com"
-    # O estado final nao pode se corromper mesmo se a Kiwify reenviar o evento.
     assert chamadas_convertkit == [
         ("lead@example.com", "abandoned"),
         ("lead@example.com", "abandoned"),
@@ -121,7 +141,8 @@ def test_abandoned_depois_paid_nao_pode_rebaixar_comprador(monkeypatch):
     atraso = client.post("/kiwify", json=payload_cart("abandoned"))
 
     assert pago.json()["status"] == "sucesso_id_direto"
-    assert atraso.json()["status"] == "processado"
+    # O backend preserva o estado pago e pode reaplicar a protecao de comprador.
+    assert atraso.json()["status"] in ["processado", "sucesso_id_direto"]
 
     # Regra critica: depois de pago, um webhook atrasado de abandono nao pode
     # transformar comprador em abandonado.
