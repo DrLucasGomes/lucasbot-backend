@@ -95,3 +95,72 @@ def test_tracking_chave_direta_tem_prioridade():
     tracking = main.extrair_tracking_kiwify(dados)
     assert tracking["checkout_src"] == "mc_123456"
     assert tracking["checkout_utm_source"] == "manychat"
+
+
+@pytest.mark.parametrize("valor", ["{{email}}", "prefixo{{campo}}", "{{campo}}sufixo", " undefined ", " NULL "])
+def test_valor_valido_rejeita_placeholders_e_nulos_com_espacos(valor):
+    assert main.valor_valido(valor) is False
+
+
+@pytest.mark.parametrize("valor", [None, "", "none", "null", "undefined", "{{manychat_id}}"])
+def test_manychat_id_valido_rejeita_identificadores_quebrados(valor):
+    assert main.manychat_id_valido(valor) is False
+
+
+def test_limpar_telefone_sem_digitos_retorna_none():
+    assert main.limpar_telefone("telefone-invalido") is None
+
+
+def test_limpar_payload_preserva_email_e_campos_de_negocio_validos():
+    dados = {
+        "email": "  eric@yahoo.com  ",
+        "status_testosterona": "Baixa Confirmada",
+        "tempo_sintoma": "3-12 meses",
+        "risco": "Sim",
+        "origem": "youtube",
+    }
+    assert main.limpar_payload_supabase(dados) == {
+        "email": "eric@yahoo.com",
+        "status_testosterona": "Baixa Confirmada",
+        "tempo_sintoma": "3-12 meses",
+        "risco": "Sim",
+        "origem": "youtube",
+    }
+
+
+def test_limpar_payload_nao_aceita_campo_arbitrario_mesmo_com_valor_valido():
+    assert main.limpar_payload_supabase({"admin": "true", "manychat_id": "42"}) == {"manychat_id": "42"}
+
+
+@pytest.mark.parametrize("atual", ["paid", "approved", "order_approved", " PAID "])
+@pytest.mark.parametrize("novo", ["abandoned", "cart_abandoned", " ABANDONED "])
+def test_status_pago_nunca_e_rebaixado_por_abandono_atrasado(atual, novo):
+    assert main.status_pagamento_final(atual, novo).strip().lower() in main.STATUS_PAGOS
+
+
+@pytest.mark.parametrize("novo", ["paid", "approved", "order_approved"])
+def test_status_abandonado_pode_subir_para_pago(novo):
+    assert main.status_pagamento_final("abandoned", novo) == novo
+
+
+def test_status_repetido_pago_permanece_pago():
+    assert main.status_pagamento_final("paid", "paid") == "paid"
+
+
+def test_status_sem_estado_anterior_aceita_novo_estado():
+    assert main.status_pagamento_final(None, "abandoned") == "abandoned"
+
+
+def test_tracking_recursivo_em_lista_profunda():
+    dados = {"events": [{"metadata": {}}, {"metadata": {"utm_content": "video_17"}}]}
+    assert main.buscar_valor_recursivo(dados, ["utm_content"]) == "video_17"
+
+
+def test_tracking_url_extrai_utm_term():
+    dados = {"url": "https://checkout.exemplo.com/?utm_term=erecao%20forte"}
+    tracking = main.extrair_tracking_kiwify(dados)
+    assert tracking["checkout_utm_term"] == "erecao forte"
+
+
+def test_src_manychat_com_espacos_extrai_id():
+    assert main.extrair_manychat_id_do_src("  mc_987654  ") == "987654"
