@@ -49,6 +49,9 @@ CAMPOS_TELEFONE = {
     "telefone_checkout_kiwify"
 }
 
+STATUS_PAGOS = {"paid", "approved", "order_approved"}
+STATUS_ABANDONO = {"abandoned", "cart_abandoned"}
+
 
 def valor_valido(v):
     if v is None:
@@ -269,6 +272,17 @@ def classificar_origem_compra(src, utm_source):
     return "desconhecida"
 
 
+def status_pagamento_final(status_atual, status_novo):
+    atual = str(status_atual).strip().lower() if valor_valido(status_atual) else None
+    novo = str(status_novo).strip().lower() if valor_valido(status_novo) else None
+
+    # Regra critica: pagamento confirmado e terminal. Um evento atrasado de
+    # abandono nunca pode rebaixar um comprador para abandonado.
+    if atual in STATUS_PAGOS and novo in STATUS_ABANDONO:
+        return atual
+
+    return novo
+
 
 def adicionar_lead_convertkit(email: str):
     """
@@ -348,7 +362,7 @@ def buscar_lead_por_campo(campo: str, valor: str):
         f"{URL}/rest/v1/leads_vigor",
         params={
             campo: f"eq.{valor}",
-            "select": "id,email,telefone,telefone_whatsapp,telefone_checkout_kiwify,manychat_id"
+            "select": "id,email,telefone,telefone_whatsapp,telefone_checkout_kiwify,manychat_id,status_pagamento"
         },
         headers=obter_headers_supabase(),
         timeout=15
@@ -360,6 +374,27 @@ def buscar_lead_por_campo(campo: str, valor: str):
             return leads[0]
 
     return None
+
+
+def buscar_lead_existente(manychat_id=None, telefone=None, email=None):
+    lead = None
+
+    if manychat_id_valido(manychat_id):
+        lead = buscar_lead_por_campo("manychat_id", str(manychat_id).strip())
+
+    if not lead and telefone:
+        lead = buscar_lead_por_campo("telefone", telefone)
+
+    if not lead and telefone:
+        lead = buscar_lead_por_campo("telefone_whatsapp", telefone)
+
+    if not lead and telefone:
+        lead = buscar_lead_por_campo("telefone_checkout_kiwify", telefone)
+
+    if not lead and email:
+        lead = buscar_lead_por_campo("email", email)
+
+    return lead
 
 
 @app.post("/webhook")
@@ -560,6 +595,26 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
         if status:
             status = str(status).strip().lower()
 
+        # Para eventos de abandono, consulta o estado atual antes de gravar.
+        # Isso impede webhook atrasado de abandono de sobrescrever um pagamento confirmado.
+        lead_existente = None
+        if status in STATUS_ABANDONO:
+            try:
+                lead_existente = buscar_lead_existente(
+                    manychat_id=manychat_user_id,
+                    telefone=telefone,
+                    email=email
+                )
+            except Exception as e:
+                print(f"[Kiwify] Falha ao consultar estado atual antes do abandono: {str(e)}")
+                lead_existente = None
+
+            if lead_existente:
+                status = status_pagamento_final(
+                    lead_existente.get("status_pagamento"),
+                    status
+                )
+
         payload_supabase = limpar_payload_supabase({
             "nome": nome,
             "email": email,
@@ -604,19 +659,12 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
             supabase_resposta = resposta_segura(response_supabase)
 
         else:
-            lead_existente = None
-
-            if telefone:
-                lead_existente = buscar_lead_por_campo("telefone", telefone)
-
-            if not lead_existente and telefone:
-                lead_existente = buscar_lead_por_campo("telefone_whatsapp", telefone)
-
-            if not lead_existente and telefone:
-                lead_existente = buscar_lead_por_campo("telefone_checkout_kiwify", telefone)
-
-            if not lead_existente and email:
-                lead_existente = buscar_lead_por_campo("email", email)
+            if not lead_existente:
+                lead_existente = buscar_lead_existente(
+                    manychat_id=None,
+                    telefone=telefone,
+                    email=email
+                )
 
             if lead_existente:
                 lead_id = lead_existente.get("id")
@@ -652,7 +700,7 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
         if email and status:
             background_tasks.add_task(gerenciar_tags_convertkit, email, status)
 
-        if status in ["paid", "approved", "order_approved"]:
+        if status in STATUS_PAGOS:
             headers_mc = obter_headers_manychat()
 
             if manychat_id_valido(manychat_id_para_tag):
