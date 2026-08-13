@@ -10,6 +10,7 @@ from tracking_origin import hash_ip, montar_registro_click, montar_url_whatsapp
 router = APIRouter()
 
 SUPABASE_URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
+TRACKING_TABLE = "click_sessions"
 
 
 def interpretar_codigo(codigo: str) -> dict:
@@ -58,7 +59,7 @@ def extrair_ip(request: Request) -> str | None:
 
 def salvar_click(registro: dict):
     return requests.post(
-        f"{SUPABASE_URL}/rest/v1/tracking_clicks",
+        f"{SUPABASE_URL}/rest/v1/{TRACKING_TABLE}",
         json=registro,
         headers=headers_supabase(),
         timeout=10,
@@ -69,7 +70,7 @@ def salvar_click(registro: dict):
 def redirect_tracking(codigo: str, request: Request):
     """
     Registra o clique antes do WhatsApp abrir.
-    Ex.: /r/yt101 -> tracking_clicks -> wa.me com token.
+    Ex.: /r/yt101 -> click_sessions -> wa.me com token.
     """
     try:
         meta = interpretar_codigo(codigo)
