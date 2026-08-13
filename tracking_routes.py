@@ -89,7 +89,13 @@ def redirect_tracking(codigo: str, request: Request):
 
     resposta = salvar_click(registro)
     if resposta.status_code not in (200, 201, 204):
-        raise HTTPException(status_code=502, detail="falha ao registrar tracking")
+        # Branch de teste: devolve o erro real do Supabase para diagnostico.
+        detalhe = resposta.text[:1500] if resposta.text else "sem corpo de resposta"
+        print(f"[TRACKING] Supabase {resposta.status_code}: {detalhe}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Supabase {resposta.status_code}: {detalhe}",
+        )
 
     destino = montar_url_whatsapp(numero, registro["token"], mensagem_base="VIGOR")
     return RedirectResponse(url=destino, status_code=302)
