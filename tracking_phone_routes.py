@@ -26,18 +26,6 @@ def salvar_sessao(registro: dict):
         raise HTTPException(status_code=502, detail=f"Supabase {r.status_code}: {r.text[:1000]}")
 
 
-def salvar_telefone(token: str, telefone: str):
-    r = requests.patch(
-        f"{SUPABASE_URL}/rest/v1/click_sessions",
-        params={"token": f"eq.{token}", "claimed": "eq.false"},
-        json={"telefone": telefone},
-        headers=headers_supabase(),
-        timeout=10,
-    )
-    if r.status_code not in (200, 204):
-        raise HTTPException(status_code=502, detail=f"Supabase {r.status_code}: {r.text[:1000]}")
-
-
 def buscar_sessao(token: str):
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/click_sessions",
@@ -49,6 +37,41 @@ def buscar_sessao(token: str):
         raise HTTPException(status_code=502, detail=f"Supabase {r.status_code}: {r.text[:1000]}")
     dados = r.json()
     return dados[0] if isinstance(dados, list) and dados else None
+
+
+def salvar_telefone(token: str, telefone: str):
+    # Exige retorno da linha alterada e depois relê a sessão. Assim só abrimos o
+    # WhatsApp quando tivermos certeza de que o telefone realmente persistiu.
+    headers = headers_supabase()
+    headers["Prefer"] = "return=representation"
+
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/click_sessions",
+        params={"token": f"eq.{token}", "claimed": "eq.false"},
+        json={"telefone": telefone},
+        headers=headers,
+        timeout=10,
+    )
+    if r.status_code not in (200, 204):
+        raise HTTPException(status_code=502, detail=f"Supabase {r.status_code}: {r.text[:1000]}")
+
+    try:
+        alteradas = r.json()
+    except Exception:
+        alteradas = []
+
+    if not isinstance(alteradas, list) or not alteradas:
+        raise HTTPException(status_code=409, detail="telefone nao persistido: nenhuma linha atualizada")
+
+    telefone_retornado = str(alteradas[0].get("telefone") or "")
+    if telefone_retornado != telefone:
+        raise HTTPException(status_code=409, detail="telefone nao persistido corretamente")
+
+    confirmacao = buscar_sessao(token)
+    if not confirmacao or str(confirmacao.get("telefone") or "") != telefone:
+        raise HTTPException(status_code=409, detail="telefone nao confirmado apos gravacao")
+
+    return confirmacao
 
 
 @router.get("/p/{codigo}", response_class=HTMLResponse)
