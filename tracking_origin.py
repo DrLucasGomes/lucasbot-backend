@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
+import re
 import secrets
 from urllib.parse import urlencode
 
 
 TRACKING_TTL_MINUTES = 30
+INFERENCE_WINDOW_SECONDS = 90
 
 
 def gerar_token(tamanho_bytes: int = 9) -> str:
@@ -17,6 +19,14 @@ def hash_ip(ip: str | None, salt: str = "") -> str | None:
         return None
     base = f"{salt}:{ip}".encode("utf-8")
     return hashlib.sha256(base).hexdigest()
+
+
+def extrair_token_mensagem(mensagem: str | None) -> str | None:
+    """Extrai token de mensagens como 'VIGOR AbCd_123-xY'."""
+    if not mensagem:
+        return None
+    match = re.search(r"\bVIGOR\s+([A-Za-z0-9_-]{10,64})\b", str(mensagem), flags=re.IGNORECASE)
+    return match.group(1) if match else None
 
 
 def montar_registro_click(
@@ -89,6 +99,20 @@ def claim_exato(registro: dict, *, manychat_id: str, lead_id: str | None = None,
         "claimed": True,
         "claim_method": "token",
         "claim_confidence": "exact",
+        "claimed_at": agora.isoformat(),
+    })
+    return atualizado
+
+
+def claim_inferido(registro: dict, *, manychat_id: str, agora: datetime | None = None) -> dict:
+    """Marca atribuicao temporal conservadora quando existe um unico clique recente."""
+    agora = agora or datetime.now(timezone.utc)
+    atualizado = dict(registro)
+    atualizado.update({
+        "manychat_id": str(manychat_id),
+        "claimed": True,
+        "claim_method": "recent_unique_click",
+        "claim_confidence": "medium",
         "claimed_at": agora.isoformat(),
     })
     return atualizado
