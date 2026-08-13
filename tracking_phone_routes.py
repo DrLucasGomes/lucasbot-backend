@@ -1,8 +1,7 @@
 import os
-import re
 
 import requests
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from tracking_origin import hash_ip, montar_registro_click, montar_url_whatsapp
@@ -83,7 +82,7 @@ def pagina_tracking(codigo: str, request: Request):
 <body>
   <h2>Continuar no WhatsApp</h2>
   <p>Digite o número do WhatsApp que você usa para falar com o LucasBot.</p>
-  <form method="post" action="/tracking/phone/{registro['token']}">
+  <form method="get" action="/tracking/phone/{registro['token']}">
     <input name="telefone" inputmode="tel" autocomplete="tel" placeholder="Ex.: +55 49 99999-9999" required>
     <button type="submit">Abrir WhatsApp</button>
   </form>
@@ -93,8 +92,8 @@ def pagina_tracking(codigo: str, request: Request):
 """)
 
 
-@router.post("/tracking/phone/{token}")
-def registrar_telefone_e_abrir_whatsapp(token: str, telefone: str = Form(...)):
+@router.get("/tracking/phone/{token}")
+def registrar_telefone_e_abrir_whatsapp(token: str, telefone: str):
     tel = normalizar_telefone(telefone)
     if not tel:
         raise HTTPException(status_code=400, detail="telefone invalido")
