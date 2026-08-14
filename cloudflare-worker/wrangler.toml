@@ -1,0 +1,12 @@
+name = "lucas-tracking-edge"
+main = "src/index.js"
+compatibility_date = "2026-08-14"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[vars]
+# Nao coloque segredos aqui. Configure-os no painel da Cloudflare ou com wrangler secret put.
+# WHATSAPP_NUMBER pode ser var normal; SUPABASE_KEY e TRACKING_IP_SALT devem ser secrets.
+WHATSAPP_NUMBER = ""
