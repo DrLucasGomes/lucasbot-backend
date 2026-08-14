@@ -12,8 +12,9 @@ import tracking_routes
 
 
 class FakeResponse:
-    def __init__(self, status_code=201):
+    def __init__(self, status_code=201, text=""):
         self.status_code = status_code
+        self.text = text
 
 
 app = FastAPI()
@@ -68,7 +69,7 @@ def test_redirect_grava_click_antes_de_abrir_whatsapp(monkeypatch):
     )
 
     assert resposta.status_code == 302
-    assert capturado["url"].endswith("/rest/v1/tracking_clicks")
+    assert capturado["url"].endswith("/rest/v1/click_sessions")
     assert capturado["json"]["origem"] == "YouTube"
     assert capturado["json"]["campanha"] == "Vigor_YT_101"
     assert capturado["json"]["claimed"] is False
@@ -82,6 +83,11 @@ def test_redirect_grava_click_antes_de_abrir_whatsapp(monkeypatch):
 
 def test_falha_supabase_nao_redireciona(monkeypatch):
     monkeypatch.setenv("WHATSAPP_NUMBER", "5549999999999")
-    monkeypatch.setattr(tracking_routes.requests, "post", lambda *a, **k: FakeResponse(500))
+    monkeypatch.setattr(
+        tracking_routes.requests,
+        "post",
+        lambda *a, **k: FakeResponse(500, "erro simulado"),
+    )
     resposta = client.get("/r/yt101", follow_redirects=False)
     assert resposta.status_code == 502
+    assert "Supabase 500" in resposta.json()["detail"]
