@@ -104,15 +104,22 @@ def claim_exato(registro: dict, *, manychat_id: str, lead_id: str | None = None,
     return atualizado
 
 
-def claim_inferido(registro: dict, *, manychat_id: str, agora: datetime | None = None) -> dict:
-    """Marca atribuicao temporal conservadora quando existe um unico clique recente."""
+def claim_inferido(
+    registro: dict,
+    *,
+    manychat_id: str,
+    agora: datetime | None = None,
+    metodo: str = "recent_unique_click",
+    confianca: str = "medium",
+) -> dict:
+    """Marca atribuicao inferida sem fingir que ela e exata."""
     agora = agora or datetime.now(timezone.utc)
     atualizado = dict(registro)
     atualizado.update({
         "manychat_id": str(manychat_id),
         "claimed": True,
-        "claim_method": "recent_unique_click",
-        "claim_confidence": "medium",
+        "claim_method": metodo,
+        "claim_confidence": confianca,
         "claimed_at": agora.isoformat(),
     })
     return atualizado
