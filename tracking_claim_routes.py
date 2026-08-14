@@ -39,7 +39,7 @@ def buscar_click_por_token(token: str):
     return dados[0] if isinstance(dados, list) and dados else None
 
 
-def buscar_unico_click_recente():
+def buscar_clicks_recentes():
     agora = datetime.now(timezone.utc)
     inicio = agora - timedelta(seconds=INFERENCE_WINDOW_SECONDS)
     r = requests.get(
@@ -50,15 +50,47 @@ def buscar_unico_click_recente():
             "expires_at": f"gt.{agora.isoformat()}",
             "select": "*",
             "order": "created_at.desc",
-            "limit": "2",
+            "limit": "10",
         },
         headers=headers_supabase(),
         timeout=10,
     )
     if r.status_code != 200:
         raise HTTPException(status_code=502, detail=f"Supabase {r.status_code}: {r.text[:1000]}")
-    dados = r.json() if isinstance(r.json(), list) else []
-    return dados[0] if len(dados) == 1 else None
+    dados = r.json()
+    return dados if isinstance(dados, list) else []
+
+
+def escolher_candidato_inferido(clicks: list[dict]):
+    """
+    So infere quando nao ha risco de atribuir a campanha errada.
+
+    1 clique recente -> candidato unico (medium).
+    2+ cliques recentes -> so aceita se TODOS apontarem para a mesma
+    origem/campanha/video; nesse caso a identidade da sessao pode ser ambigua,
+    mas a atribuicao de campanha continua consistente (high para campanha).
+    """
+    if not clicks:
+        return None, None, None
+
+    if len(clicks) == 1:
+        return clicks[0], "recent_unique_click", "medium"
+
+    assinaturas = {
+        (
+            str(c.get("origem") or "").strip().lower(),
+            str(c.get("campanha") or "").strip().lower(),
+            str(c.get("video") or "").strip().lower(),
+        )
+        for c in clicks
+    }
+
+    if len(assinaturas) == 1:
+        # Usa o mais recente apenas como sessao representativa; o que estamos
+        # afirmando com confianca e a campanha, nao a identidade exata do clique.
+        return clicks[0], "recent_campaign_consensus", "high"
+
+    return None, None, None
 
 
 def salvar_claim(registro: dict):
@@ -82,7 +114,6 @@ def salvar_claim(registro: dict):
 
 
 def garantir_origem_no_lead(registro: dict, manychat_id: str):
-    # Primeiro procura o lead para nunca sobrescrever origem/campanha ja existentes.
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/leads_vigor",
         params={
@@ -119,8 +150,6 @@ def garantir_origem_no_lead(registro: dict, manychat_id: str):
                 raise HTTPException(status_code=502, detail=f"Supabase lead PATCH {p.status_code}: {p.text[:1000]}")
         return "preservado_ou_preenchido"
 
-    # Se ainda nao existe lead, cria apenas o esqueleto. O /webhook atual depois faz upsert
-    # pelo mesmo manychat_id e completa a linha sem depender da mensagem original.
     payload = {"manychat_id": str(manychat_id)}
     if origem:
         payload["origem"] = origem
@@ -160,16 +189,22 @@ def claim_tracking(payload: ClaimPayload):
                 metodo = "token"
 
     if not registro:
-        candidato = buscar_unico_click_recente()
+        clicks = buscar_clicks_recentes()
+        candidato, metodo_inferido, confianca = escolher_candidato_inferido(clicks)
         if candidato:
-            registro = claim_inferido(candidato, manychat_id=manychat_id)
-            metodo = "recent_unique_click"
+            registro = claim_inferido(
+                candidato,
+                manychat_id=manychat_id,
+                metodo=metodo_inferido,
+                confianca=confianca,
+            )
+            metodo = metodo_inferido
 
     if not registro:
         return {
             "status": "sem_atribuicao_segura",
             "manychat_id": manychat_id,
-            "motivo": "token ausente/invalido e nenhum clique recente unico",
+            "motivo": "token ausente/invalido e cliques recentes apontam para campanhas diferentes ou nao existem",
         }
 
     salvar_claim(registro)
