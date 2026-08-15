@@ -9,6 +9,7 @@ que preserva origem/campanha first-touch. A main de producao continua intacta.
 """
 
 from main import app
+from journey_events import router as journey_events_router
 from tracking_routes import router as tracking_router
 from tracking_claim_routes import router as tracking_claim_router
 from tracking_safe_webhook import router as tracking_safe_webhook_router
@@ -27,3 +28,4 @@ app.router.routes = [
 app.include_router(tracking_safe_webhook_router)
 app.include_router(tracking_router)
 app.include_router(tracking_claim_router)
+app.include_router(journey_events_router)
