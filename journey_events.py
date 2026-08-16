@@ -1,4 +1,5 @@
 from typing import Any
+from uuid import UUID, uuid4
 
 import requests
 from fastapi import APIRouter
@@ -24,6 +25,7 @@ class JourneyEventPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     lead_id: str | None = None
+    journey_run_id: UUID | None = None
     manychat_id: str
     event_name: str
     event_stage: str | None = None
@@ -71,6 +73,7 @@ def registrar_evento_jornada(payload: JourneyEventPayload) -> dict:
     dedupe_key = payload.dedupe_key
     corpo = {
         "lead_id": payload.lead_id,
+        "journey_run_id": str(payload.journey_run_id) if payload.journey_run_id else None,
         "manychat_id": payload.manychat_id,
         "event_name": payload.event_name,
         "event_stage": payload.event_stage.strip() if payload.event_stage else None,
@@ -141,6 +144,7 @@ def evento_jornada(payload: JourneyEventPayload):
             "dedupe_key": resultado["dedupe_key"],
             "event_name": payload.event_name,
             "manychat_id": payload.manychat_id,
+            "journey_run_id": str(payload.journey_run_id) if payload.journey_run_id else None,
         }
 
     return {
@@ -150,4 +154,10 @@ def evento_jornada(payload: JourneyEventPayload):
         "detail": resultado.get("detail"),
         "event_name": payload.event_name,
         "manychat_id": payload.manychat_id,
+        "journey_run_id": str(payload.journey_run_id) if payload.journey_run_id else None,
     }
+
+
+@router.post("/run")
+def criar_execucao_jornada():
+    return {"journey_run_id": str(uuid4())}
