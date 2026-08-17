@@ -1,3 +1,4 @@
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI
@@ -107,6 +108,44 @@ def test_post_journey_event_preserva_journey_run_id(monkeypatch):
     assert capturado["json"]["dedupe_key"] == "evt-step-answered-run-001"
 
 
+def test_step_started_e_step_answered_preservam_run_e_ordem(monkeypatch):
+    chamadas = []
+    journey_run_id = "1c47525d-f44a-4384-bd70-1404c5a8b738"
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        chamadas.append(json)
+        return FakeResponse(201, json_data={"id": f"evt-{len(chamadas)}"})
+
+    monkeypatch.setattr(journey_events.requests, "post", fake_post)
+
+    base = {
+        "journey_run_id": journey_run_id,
+        "manychat_id": "mc_sequence",
+        "event_stage": "idade",
+        "source_system": "manychat",
+    }
+    iniciado = client.post(
+        "/journey/event",
+        json={**base, "event_name": "step_started", "dedupe_key": "idade-started-001"},
+    )
+    respondido = client.post(
+        "/journey/event",
+        json={
+            **base,
+            "event_name": "step_answered",
+            "event_value": "45",
+            "dedupe_key": "idade-answered-001",
+        },
+    )
+
+    assert iniciado.status_code == 200
+    assert respondido.status_code == 200
+    assert [chamada["event_name"] for chamada in chamadas] == ["step_started", "step_answered"]
+    assert [chamada["journey_run_id"] for chamada in chamadas] == [journey_run_id, journey_run_id]
+    assert [chamada["event_stage"] for chamada in chamadas] == ["idade", "idade"]
+    assert chamadas[0]["dedupe_key"] != chamadas[1]["dedupe_key"]
+
+
 def test_post_journey_event_rejeita_journey_run_id_invalido(monkeypatch):
     chamadas = []
 
@@ -154,6 +193,41 @@ def test_post_journey_event_409_23505_e_idempotente(monkeypatch):
     assert resposta.json()["status"] == "accepted"
     assert resposta.json()["idempotent"] is True
     assert resposta.json()["journey_run_id"] == payload["journey_run_id"]
+
+
+def test_mesma_dedupe_key_em_runs_diferentes_continua_idempotente(monkeypatch):
+    chamadas = []
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        chamadas.append(json)
+        if len(chamadas) == 1:
+            return FakeResponse(201, json_data={"id": "evt-original"})
+        return FakeResponse(409, text='{"code":"23505"}', json_data={"code": "23505"})
+
+    monkeypatch.setattr(journey_events.requests, "post", fake_post)
+
+    base = {
+        "manychat_id": "mc_dedupe_runs",
+        "event_name": "step_started",
+        "event_stage": "idade",
+        "source_system": "manychat",
+        "dedupe_key": "dedupe-global-001",
+    }
+    primeiro = client.post(
+        "/journey/event",
+        json={**base, "journey_run_id": "92a5c8be-6630-49e8-80f2-0212de88b490"},
+    )
+    segundo = client.post(
+        "/journey/event",
+        json={**base, "journey_run_id": "1adebe1e-daf2-48ce-8162-50c46efea1aa"},
+    )
+
+    assert primeiro.json()["idempotent"] is False
+    assert segundo.status_code == 200
+    assert segundo.json()["status"] == "accepted"
+    assert segundo.json()["idempotent"] is True
+    assert chamadas[0]["journey_run_id"] != chamadas[1]["journey_run_id"]
+    assert chamadas[0]["dedupe_key"] == chamadas[1]["dedupe_key"]
 
 
 def test_post_journey_event_409_sem_23505_e_falha_controlada(monkeypatch):
@@ -281,3 +355,14 @@ def test_post_journey_event_rejeita_payload_invalido():
     )
 
     assert resposta.status_code == 422
+
+
+def test_migration_mantem_dedupe_global_e_journey_events_append_only():
+    migration = (Path(__file__).parents[1] / "sql" / "002_create_journey_events.sql").read_text(
+        encoding="utf-8"
+    )
+    sql_normalizado = " ".join(migration.lower().split())
+
+    assert "dedupe_key text not null unique" in sql_normalizado
+    assert "before update or delete on public.journey_events" in sql_normalizado
+    assert "execute function public.prevent_update_delete_journey_events()" in sql_normalizado
