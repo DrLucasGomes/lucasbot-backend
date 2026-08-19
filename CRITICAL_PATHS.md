@@ -23,3 +23,28 @@ Para mudanças em jornada, confirme especialmente a preservação de `manychat_i
 ## Runtime de produção
 
 Produção não deve ser movida de volta para o Render Free sem reavaliar explicitamente o risco de spin-down e cold start. Essa avaliação deve considerar a latência da primeira requisição e possíveis timeouts ou atrasos nos fluxos do ManyChat, da Kiwify e de `journey_events`.
+
+## Recuperação pós-play da VSL
+
+O primeiro play elegível da VSL e o abandono de checkout são gatilhos distintos.
+Não misture `POST /recovery/video-play` com `cart_abandoned` nem altere o fluxo
+de recuperação de checkout ao evoluir a recuperação pós-play.
+
+Regras críticas:
+
+- nunca confiar em e-mail enviado pelo navegador; a identidade V1 é somente
+  `src=mc_<manychat_id>` e o e-mail vem de `leads_vigor`;
+- não remover a proteção de `STATUS_PAGOS`: comprador é inelegível para a tag
+  de recuperação pós-play;
+- garantir que a migration `004_create_recovery_video_plays.sql` exista no
+  Supabase antes do deploy do endpoint;
+- configurar `TAG_RECUPERACAO_VIDEO_ID` no Render com o ID da tag
+  `recuperacao-pos-clique-vigor360`;
+- manter falhas de Supabase ou Kit fora do caminho crítico do player: a
+  recuperação nunca pode impedir o vídeo de tocar;
+- em alterações futuras no player, preservar o comportamento atual do vídeo e
+  do botão `.botao-vigor`.
+
+A tabela `recovery_video_plays` protege concorrência e retries por estado. Não
+remova a terminalidade de `completed`, o retry de `failed` nem a recuperação de
+`processing` stale após 5 minutos sem reavaliar a idempotência do fluxo.
