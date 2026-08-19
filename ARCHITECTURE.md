@@ -1,5 +1,9 @@
 # Arquitetura
 
+## Runtime de produção
+
+O runtime atual de produção é o Render Starter, adotado para manter o backend ativo e evitar spin-down e cold start após períodos de inatividade. A mudança de plano não alterou a URL do serviço nem o código da aplicação.
+
 ## Estado do lead e histórico da jornada
 
 `leads_vigor` mantém o estado consolidado e atual do lead. Seus registros podem ser atualizados conforme novas informações chegam e são usados pelos fluxos operacionais existentes.
