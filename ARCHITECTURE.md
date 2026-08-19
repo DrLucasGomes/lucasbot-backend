@@ -29,3 +29,27 @@ Eventos históricos sem `journey_run_id` são aceitos por compatibilidade. Eles 
 ## Limites de mudança
 
 A instrumentação de jornada é adicional. Ela não altera os contratos de `/webhook`, `/kiwify`, tracking, `leads_vigor` ou `click_sessions`.
+
+## Recuperação após o play da VSL
+
+`POST /recovery/video-play` é o gatilho operacional do primeiro play elegível
+da VSL do Vigor 360. Esse fluxo é independente do clique no checkout e de
+`cart_abandoned`.
+
+Na V1, o endpoint aceita identidade exclusivamente por `src=mc_<manychat_id>`.
+O e-mail não é aceito do navegador: ele é obtido de `leads_vigor`. Leads sem
+e-mail válido, inexistentes ou com `status_pagamento` em `STATUS_PAGOS` não
+recebem a tag `recuperacao-pos-clique-vigor360` no Kit.
+
+O estado operacional e a deduplicação ficam em `recovery_video_plays`, com uma
+linha única por `manychat_id`. `completed` é terminal, `failed` pode ser
+retomado e `processing` pode ser readquirido atomicamente quando estiver stale
+há mais de 5 minutos. A integração é at-least-once com deduplicação local, sem
+garantia de exactly-once entre Supabase e Kit.
+
+O fluxo de compra continua responsável por aplicar `Comprador Vigor 360`, que
+remove o contato da sequência no Kit. `journey_events` permanece telemetria e
+não participa da execução operacional da recuperação.
+
+O WordPress/VSL ainda não foi alterado nesta etapa. Token assinado e
+`journey_run_id` na URL da VSL permanecem como hardening futuro.
