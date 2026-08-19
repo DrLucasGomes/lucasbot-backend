@@ -8,12 +8,25 @@ No ambiente de teste, substitui somente POST /webhook por uma versao protegida
 que preserva origem/campanha first-touch. A main de producao continua intacta.
 """
 
+from fastapi.middleware.cors import CORSMiddleware
+
 from main import app
 from journey_events import router as journey_events_router
 from tracking_routes import router as tracking_router
 from tracking_claim_routes import router as tracking_claim_router
 from tracking_safe_webhook import router as tracking_safe_webhook_router
 from recovery_routes import router as recovery_router
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://drlucasgomes.com.br",
+        "https://www.drlucasgomes.com.br",
+    ],
+    allow_credentials=False,
+    allow_methods=["POST"],
+    allow_headers=["Content-Type"],
+)
 
 # Remove apenas a rota POST /webhook importada de main para evitar duas rotas
 # concorrentes no servico de teste. /kiwify e todas as demais permanecem iguais.
