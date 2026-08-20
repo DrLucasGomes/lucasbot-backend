@@ -8,6 +8,28 @@ alter table if exists public.recovery_pix_orders
     add column if not exists attempt_token text;
 
 alter table if exists public.recovery_pix_orders
+    add column if not exists subscribe_attempted boolean not null default false;
+
+-- Converte estados antigos de forma conservadora: se a ordem ja chegou a
+-- subscribing/completed/failed/cancelamento, assumimos que pode ter existido
+-- um efeito remoto de subscribe e preservamos isso para reconciliacao segura.
+update public.recovery_pix_orders
+   set subscribe_attempted = true
+ where status in (
+    'subscribing',
+    'completed',
+    'failed',
+    'cancelled_pending_unsubscribe',
+    'cancelled'
+ );
+
+-- Cancelled antigo com tentativa conhecida volta a pending detectavel.
+update public.recovery_pix_orders
+   set status = 'cancelled_pending_unsubscribe'
+ where status = 'cancelled'
+   and subscribe_attempted = true;
+
+alter table if exists public.recovery_pix_orders
     alter column email drop not null;
 
 alter table if exists public.recovery_pix_orders
@@ -117,6 +139,11 @@ begin
 
     update public.recovery_pix_orders
        set status = p_to_status,
+           subscribe_attempted = case
+               when p_from_status = 'processing' and p_to_status = 'subscribing'
+                   then true
+               else subscribe_attempted
+           end,
            processing_started_at = case
                when p_to_status = 'subscribing' then now()
                else processing_started_at
@@ -153,6 +180,7 @@ begin
     on conflict (order_id) do update
        set status = case
                when public.recovery_pix_orders.status = 'cancelled'
+                    and public.recovery_pix_orders.subscribe_attempted = false
                    then 'cancelled'
                else 'cancelled_pending_unsubscribe'
            end,
@@ -178,6 +206,7 @@ begin
        set status = 'cancelled_pending_unsubscribe'
      where order_id = p_order_id
        and attempt_token = p_attempt_token
+       and subscribe_attempted = true
        and status in ('cancelled', 'cancelled_pending_unsubscribe');
 
     get diagnostics affected = row_count;
@@ -199,7 +228,8 @@ begin
     update public.recovery_pix_orders
        set status = 'cancelled'
      where order_id = p_order_id
-       and status = 'cancelled_pending_unsubscribe';
+       and status = 'cancelled_pending_unsubscribe'
+       and subscribe_attempted = false;
 
     get diagnostics affected = row_count;
     if affected = 1 then
@@ -211,6 +241,7 @@ begin
           from public.recovery_pix_orders
          where order_id = p_order_id
            and status = 'cancelled'
+           and subscribe_attempted = false
     );
 end;
 $$;
