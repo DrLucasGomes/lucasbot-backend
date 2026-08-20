@@ -18,9 +18,7 @@ def test_reconhece_contrato_real_pix_created():
 
 
 def test_waiting_payment_sozinho_nao_dispara_pix():
-    assert pix_recovery._evento_pix_criado(
-        payload_pix(webhook_event_type="order_created")
-    ) is False
+    assert pix_recovery._evento_pix_criado(payload_pix(webhook_event_type="order_created")) is False
 
 
 def test_metodo_nao_pix_nao_dispara_pix():
@@ -36,8 +34,9 @@ def test_order_id_ausente_nao_dispara_pix():
 
 
 def test_pagamento_aprovado_e_evento_terminal():
-    dados = payload_pix(order_status="paid", webhook_event_type="order_approved")
-    assert pix_recovery._evento_pago(dados) is True
+    assert pix_recovery._evento_pago(
+        payload_pix(order_status="paid", webhook_event_type="order_approved")
+    ) is True
 
 
 def test_pix_valido_faz_transicoes_com_mesmo_attempt_token(monkeypatch):
@@ -53,8 +52,7 @@ def test_pix_valido_faz_transicoes_com_mesmo_attempt_token(monkeypatch):
         "transicionar",
         lambda order_id, token, origem, destino: eventos.append(
             ("transition", token, origem, destino)
-        )
-        or True,
+        ) or True,
     )
     monkeypatch.setattr(
         pix_recovery,
@@ -72,7 +70,7 @@ def test_pix_valido_faz_transicoes_com_mesmo_attempt_token(monkeypatch):
 def test_duplicata_nao_reaplica_subscribe(monkeypatch):
     chamadas = []
     monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: False)
-    monkeypatch.setattr(pix_recovery, "reconciliar_cancelamento", lambda *args, **kwargs: False)
+    monkeypatch.setattr(pix_recovery, "reconciliar_cancelamento", lambda *args: False)
     monkeypatch.setattr(
         pix_recovery,
         "_alterar_tag_kit",
@@ -86,14 +84,13 @@ def test_falha_do_kit_marca_failed_com_token(monkeypatch):
     transicoes = []
     monkeypatch.setattr(pix_recovery, "uuid4", lambda: "attempt-2")
     monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: True)
-    monkeypatch.setattr(pix_recovery, "compensar_subscribe_concorrente", lambda *args, **kwargs: False)
+    monkeypatch.setattr(pix_recovery, "compensar_subscribe_concorrente", lambda *args: False)
     monkeypatch.setattr(
         pix_recovery,
         "transicionar",
         lambda order_id, token, origem, destino: transicoes.append(
             (token, origem, destino)
-        )
-        or True,
+        ) or True,
     )
     monkeypatch.setattr(pix_recovery, "_alterar_tag_kit", lambda *args: False)
 
@@ -109,7 +106,7 @@ def test_paid_antes_pix_impede_subscribe(monkeypatch):
     monkeypatch.setattr(
         pix_recovery,
         "reconciliar_cancelamento",
-        lambda *args, **kwargs: eventos.append("unsubscribe") or True,
+        lambda *args: eventos.append("unsubscribe") or True,
     )
     monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: False)
 
@@ -146,7 +143,7 @@ def test_subscribe_tardio_reabre_cancelled_antes_de_compensar(monkeypatch):
     monkeypatch.setattr(
         pix_recovery,
         "reconciliar_cancelamento",
-        lambda *args, **kwargs: eventos.append("compensate-unsubscribe") or True,
+        lambda *args: eventos.append("compensate-unsubscribe") or True,
     )
 
     pix_recovery.processar_pix_criado(payload_pix())
@@ -158,26 +155,22 @@ def test_subscribe_tardio_reabre_cancelled_antes_de_compensar(monkeypatch):
     ]
 
 
-def test_worker_velho_nao_reabre_sem_fencing_token(monkeypatch):
+def test_worker_velho_sem_token_atual_ainda_tenta_reconciliar(monkeypatch):
     chamadas = []
-    monkeypatch.setattr(
-        pix_recovery,
-        "reabrir_cancelamento",
-        lambda order_id, token: False,
-    )
+    monkeypatch.setattr(pix_recovery, "reabrir_cancelamento", lambda *args: False)
     monkeypatch.setattr(
         pix_recovery,
         "reconciliar_cancelamento",
-        lambda *args, **kwargs: chamadas.append("reconcile") or False,
+        lambda *args: chamadas.append("reconcile") or True,
     )
 
     assert pix_recovery.compensar_subscribe_concorrente(
         "order-1", "x@example.com", "token-velho"
-    ) is False
+    ) is True
     assert chamadas == ["reconcile"]
 
 
-def test_timeout_ambiguo_mantem_pending_detectavel(monkeypatch):
+def test_timeout_ambiguo_tenta_compensacao(monkeypatch):
     eventos = []
     monkeypatch.setattr(pix_recovery, "uuid4", lambda: "attempt-timeout")
     monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: True)
@@ -195,21 +188,13 @@ def test_timeout_ambiguo_mantem_pending_detectavel(monkeypatch):
     monkeypatch.setattr(pix_recovery, "_alterar_tag_kit", kit)
     monkeypatch.setattr(
         pix_recovery,
-        "reabrir_cancelamento",
-        lambda order_id, token: eventos.append("pending") or True,
-    )
-    monkeypatch.setattr(
-        pix_recovery,
-        "reconciliar_cancelamento",
-        lambda order_id, email="", confirmar=True: eventos.append(
-            ("reconcile", confirmar)
-        )
-        or True,
+        "compensar_subscribe_concorrente",
+        lambda *args: eventos.append("compensate") or True,
     )
 
     pix_recovery.processar_pix_criado(payload_pix())
 
-    assert eventos == ["subscribe", "pending", ("reconcile", False)]
+    assert eventos == ["subscribe", "compensate"]
 
 
 def test_pagamento_persiste_pending_antes_de_reconciliar(monkeypatch):
@@ -222,15 +207,16 @@ def test_pagamento_persiste_pending_antes_de_reconciliar(monkeypatch):
     monkeypatch.setattr(
         pix_recovery,
         "reconciliar_cancelamento",
-        lambda *args, **kwargs: eventos.append("unsubscribe") or True,
+        lambda *args: eventos.append("unsubscribe") or True,
     )
 
-    pago = payload_pix(order_status="paid", webhook_event_type="order_approved")
-    pix_recovery.cancelar_pix_por_pagamento(pago)
+    pix_recovery.cancelar_pix_por_pagamento(
+        payload_pix(order_status="paid", webhook_event_type="order_approved")
+    )
     assert eventos == ["pending", "unsubscribe"]
 
 
-def test_reconciliacao_confirmada_so_apos_unsubscribe(monkeypatch):
+def test_sem_subscribe_previo_pode_confirmar_cancelled(monkeypatch):
     eventos = []
     monkeypatch.setattr(
         pix_recovery,
@@ -238,7 +224,7 @@ def test_reconciliacao_confirmada_so_apos_unsubscribe(monkeypatch):
         lambda order_id: {
             "email": "ledger@example.com",
             "status": "cancelled_pending_unsubscribe",
-            "attempt_token": "attempt-x",
+            "subscribe_attempted": False,
         },
     )
     monkeypatch.setattr(
@@ -259,7 +245,7 @@ def test_reconciliacao_confirmada_so_apos_unsubscribe(monkeypatch):
     ]
 
 
-def test_reconciliacao_ambigua_nao_confirma_cancelled(monkeypatch):
+def test_qualquer_subscribe_previo_mantem_pending_apos_unsubscribe(monkeypatch):
     confirmacoes = []
     monkeypatch.setattr(
         pix_recovery,
@@ -267,6 +253,7 @@ def test_reconciliacao_ambigua_nao_confirma_cancelled(monkeypatch):
         lambda order_id: {
             "email": "ledger@example.com",
             "status": "cancelled_pending_unsubscribe",
+            "subscribe_attempted": True,
         },
     )
     monkeypatch.setattr(pix_recovery, "_alterar_tag_kit", lambda *args: True)
@@ -276,9 +263,7 @@ def test_reconciliacao_ambigua_nao_confirma_cancelled(monkeypatch):
         lambda order_id: confirmacoes.append(order_id) or True,
     )
 
-    assert pix_recovery.reconciliar_cancelamento(
-        "order-1", confirmar=False
-    ) is True
+    assert pix_recovery.reconciliar_cancelamento("order-1") is True
     assert confirmacoes == []
 
 
@@ -290,6 +275,7 @@ def test_falha_unsubscribe_mantem_pending(monkeypatch):
         lambda order_id: {
             "email": "ledger@example.com",
             "status": "cancelled_pending_unsubscribe",
+            "subscribe_attempted": True,
         },
     )
     monkeypatch.setattr(pix_recovery, "_alterar_tag_kit", lambda *args: False)
@@ -308,7 +294,11 @@ def test_cancelled_confirmado_nao_chama_kit(monkeypatch):
     monkeypatch.setattr(
         pix_recovery,
         "buscar_ledger",
-        lambda order_id: {"email": "x@example.com", "status": "cancelled"},
+        lambda order_id: {
+            "email": "x@example.com",
+            "status": "cancelled",
+            "subscribe_attempted": False,
+        },
     )
     monkeypatch.setattr(
         pix_recovery,
@@ -326,7 +316,7 @@ def test_pagamento_sem_email_reconcilia_ledger(monkeypatch):
     monkeypatch.setattr(
         pix_recovery,
         "reconciliar_cancelamento",
-        lambda order_id, email="", **kwargs: eventos.append((order_id, email)) or True,
+        lambda order_id, email="": eventos.append((order_id, email)) or True,
     )
 
     pago = payload_pix(
