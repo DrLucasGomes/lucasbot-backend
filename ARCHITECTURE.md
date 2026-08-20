@@ -63,16 +63,22 @@ O contrato real da Kiwify foi capturado em produção em 19/08/2026. Um PIX gera
 
 A recuperação PIX é isolada da lógica existente de abandono e compra. O wrapper executa primeiro o `/kiwify` original e somente depois agenda efeitos adicionais de PIX; falha na camada PIX não pode alterar a resposta do webhook principal.
 
-`recovery_pix_orders` usa `order_id` como chave primária. O banco controla aquisição e transições por funções RPC atômicas. Estados de trabalho são `processing`, `subscribing` e `failed`; `completed` é terminal para aquisição. Pagamentos usam dois estados de cancelamento: `cancelled_pending_unsubscribe` bloqueia imediatamente qualquer nova aquisição e registra que a remoção remota ainda precisa ser confirmada; `cancelled` significa que o Kit confirmou o unsubscribe.
+`recovery_pix_orders` usa `order_id` como chave primária. Cada tentativa de trabalho recebe também um `attempt_token` único, usado como fencing token. Aquisição stale substitui o token; portanto um worker antigo não consegue concluir, falhar ou reabrir o cancelamento de uma tentativa nova.
 
-`failed` pode ser readquirido e `processing/subscribing` stale podem ser retomados após 5 minutos. As únicas transições comuns permitidas são `processing -> subscribing`, `subscribing -> completed` e `subscribing -> failed`.
+Estados de trabalho são `processing`, `subscribing` e `failed`; `completed` é terminal para aquisição. Pagamentos usam dois estados de cancelamento: `cancelled_pending_unsubscribe` bloqueia imediatamente qualquer nova aquisição e registra que a remoção remota ainda precisa ser confirmada; `cancelled` significa que um unsubscribe foi confirmado depois do último subscribe conhecido.
+
+`failed` pode ser readquirido e `processing/subscribing` stale podem ser retomados após 5 minutos. As únicas transições comuns permitidas são `processing -> subscribing`, `subscribing -> completed` e `subscribing -> failed`, sempre condicionadas ao `attempt_token` atual.
 
 Pagamento confirmado persiste primeiro `cancelled_pending_unsubscribe` por `order_id`, mesmo que `pix_created` ainda não tenha chegado. O unsubscribe acontece depois. Se falhar ou houver timeout, o estado pending permanece durável e uma nova entrega de `paid` ou `pix_created` pode tentar reconciliar novamente sem reativar a recuperação. Só depois de unsubscribe confirmado o ledger passa para `cancelled`.
 
-Se o resultado de `subscribe` for ambíguo por timeout/exceção e um pagamento concorrente já tiver criado estado de cancelamento, o worker tenta imediatamente o unsubscribe compensatório. Se não houver cancelamento, a tentativa pode terminar em `failed` e ser retomada; por isso a garantia continua sendo at-least-once, não exactly-once.
+Uma auditoria adversarial encontrou uma corrida adicional: um `subscribe` antigo podia ser efetivado pelo Kit depois de um `unsubscribe` já confirmado, deixando ledger `cancelled` com tag presente. Para impedir estado silenciosamente divergente, o worker que realmente tentou `subscribe` e perde o CAS para `completed` usa seu `attempt_token` para executar `cancelled -> cancelled_pending_unsubscribe` antes da compensação. Assim um subscribe tardio conhecido sempre produz novo unsubscribe posterior.
+
+Se o resultado do `subscribe` for ambíguo por timeout/exceção, a compensação não confirma `cancelled` imediatamente. Mesmo que um unsubscribe retorne sucesso, o ledger permanece `cancelled_pending_unsubscribe`, porque o servidor remoto ainda pode concluir o subscribe depois do timeout local. Isso mantém a divergência potencial detectável e exige uma reconciliação futura antes do estado terminal.
 
 As RPCs `SECURITY DEFINER` revogam `EXECUTE` de `PUBLIC`, `anon` e `authenticated` e concedem execução somente a `service_role`. O `search_path` é fixado em `pg_catalog, public` e objetos persistentes são qualificados.
 
 A tag de entrada será própria do PIX (`TAG_PIX_ID` no Render, tag `pix-gerado-vigor360` no Kit). O ledger não persiste CPF, IP, `pix_code`, QR Code ou payload completo.
 
-A instalação limpa usa `sql/005_create_recovery_pix_orders.sql`. Existe também `sql/006_upgrade_recovery_pix_orders.sql`, idempotente, para convergir qualquer ambiente onde uma versão anterior da 005 tenha sido aplicada. A feature permanece em branch de teste até auditoria Codex final, suíte completa, execução das migrations no Supabase, criação/configuração da tag e teste E2E real Kiwify -> Render -> Supabase -> Kit serem aprovados.
+A instalação limpa usa `sql/005_create_recovery_pix_orders.sql`. Existe também `sql/006_upgrade_recovery_pix_orders.sql`, idempotente, para convergir qualquer ambiente onde uma versão anterior da 005 tenha sido aplicada; a 006 também adiciona `attempt_token` e remove assinaturas antigas das RPCs antes de criar as versões cercadas pelo fencing token.
+
+A feature permanece em branch de teste até auditoria Codex final, suíte completa, execução das migrations no Supabase, criação/configuração da tag e teste E2E real Kiwify -> Render -> Supabase -> Kit serem aprovados.
