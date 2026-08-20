@@ -11,6 +11,7 @@ create table if not exists public.recovery_pix_orders (
             'cancelled'
         )),
     attempt_token text,
+    subscribe_attempted boolean not null default false,
     processing_started_at timestamptz,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
@@ -116,6 +117,11 @@ begin
 
     update public.recovery_pix_orders
        set status = p_to_status,
+           subscribe_attempted = case
+               when p_from_status = 'processing' and p_to_status = 'subscribing'
+                   then true
+               else subscribe_attempted
+           end,
            processing_started_at = case
                when p_to_status = 'subscribing' then now()
                else processing_started_at
@@ -152,6 +158,7 @@ begin
     on conflict (order_id) do update
        set status = case
                when public.recovery_pix_orders.status = 'cancelled'
+                    and public.recovery_pix_orders.subscribe_attempted = false
                    then 'cancelled'
                else 'cancelled_pending_unsubscribe'
            end,
@@ -161,8 +168,6 @@ begin
 end;
 $$;
 
--- Um worker que efetivamente tentou subscribe pode reabrir um cancelled para
--- pending apenas se ainda possui o fencing token daquela tentativa.
 create or replace function public.recovery_pix_reopen_cancel(
     p_order_id text,
     p_attempt_token text
@@ -179,6 +184,7 @@ begin
        set status = 'cancelled_pending_unsubscribe'
      where order_id = p_order_id
        and attempt_token = p_attempt_token
+       and subscribe_attempted = true
        and status in ('cancelled', 'cancelled_pending_unsubscribe');
 
     get diagnostics affected = row_count;
@@ -186,6 +192,10 @@ begin
 end;
 $$;
 
+-- Somente ordens que nunca chegaram a iniciar subscribe podem ser fechadas
+-- automaticamente como cancelled. Se houve qualquer tentativa de subscribe,
+-- mantemos pending detectavel mesmo apos unsubscribe bem-sucedido: um efeito
+-- remoto tardio nao pode ficar escondido atras de um estado terminal local.
 create or replace function public.recovery_pix_confirm_cancel(
     p_order_id text
 )
@@ -200,7 +210,8 @@ begin
     update public.recovery_pix_orders
        set status = 'cancelled'
      where order_id = p_order_id
-       and status = 'cancelled_pending_unsubscribe';
+       and status = 'cancelled_pending_unsubscribe'
+       and subscribe_attempted = false;
 
     get diagnostics affected = row_count;
     if affected = 1 then
@@ -212,6 +223,7 @@ begin
           from public.recovery_pix_orders
          where order_id = p_order_id
            and status = 'cancelled'
+           and subscribe_attempted = false
     );
 end;
 $$;
