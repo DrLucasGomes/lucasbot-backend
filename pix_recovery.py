@@ -11,6 +11,7 @@ router = APIRouter(tags=["kiwify-pix-recovery"])
 PIX_TABLE = "recovery_pix_orders"
 KIT_BASE_URL = "https://api.convertkit.com/v3"
 PROCESSING_STALE_MINUTES = 5
+STATUS_CANCELAMENTO = {"cancelled_pending_unsubscribe", "cancelled"}
 
 
 def _ordem(dados):
@@ -93,25 +94,40 @@ def persistir_cancelamento(order_id: str, email: str | None) -> bool:
     )
 
 
-def buscar_email_ledger(order_id: str) -> str:
+def confirmar_cancelamento(order_id: str) -> bool:
+    return _rpc_bool(
+        "recovery_pix_confirm_cancel",
+        {"p_order_id": order_id},
+    )
+
+
+def buscar_ledger(order_id: str) -> dict:
     if not order_id:
-        return ""
+        return {}
 
     resposta = requests.get(
         f"{URL}/rest/v1/{PIX_TABLE}",
-        params={"order_id": f"eq.{order_id}", "select": "email", "limit": "1"},
+        params={
+            "order_id": f"eq.{order_id}",
+            "select": "email,status",
+            "limit": "1",
+        },
         headers=obter_headers_supabase(),
         timeout=3,
     )
     if resposta.status_code != 200:
-        return ""
+        return {}
     try:
         dados = resposta.json()
     except Exception:
-        return ""
+        return {}
     if isinstance(dados, list) and dados:
-        return _texto(dados[0].get("email"))
-    return ""
+        return dados[0]
+    return {}
+
+
+def buscar_email_ledger(order_id: str) -> str:
+    return _texto(buscar_ledger(order_id).get("email"))
 
 
 def _alterar_tag_kit(email: str, acao: str) -> bool:
@@ -128,6 +144,36 @@ def _alterar_tag_kit(email: str, acao: str) -> bool:
     return resposta.status_code in (200, 201, 204)
 
 
+def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
+    """Tenta convergir ledger cancelado e tag remota para o mesmo estado.
+
+    O estado pending e duravel. Se o Kit falhar, futuras entregas de paid ou
+    pix_created podem repetir esta reconciliacao sem reativar a recuperacao.
+    """
+    ledger = buscar_ledger(order_id)
+    status = _texto(ledger.get("status")).lower()
+    if status == "cancelled":
+        return True
+    if status != "cancelled_pending_unsubscribe":
+        return False
+
+    email = _texto(email_preferido) or _texto(ledger.get("email"))
+    if not email:
+        return False
+
+    try:
+        removido = _alterar_tag_kit(email, "unsubscribe")
+    except Exception as exc:
+        print(f"[PIX Recovery] Falha ao reconciliar unsubscribe: {str(exc)}")
+        return False
+
+    if not removido:
+        print(f"[PIX Recovery] Unsubscribe pendente para order_id: {order_id}")
+        return False
+
+    return confirmar_cancelamento(order_id)
+
+
 def processar_pix_criado(dados):
     info = _dados_pix(dados)
     order_id = info["order_id"]
@@ -137,30 +183,42 @@ def processar_pix_criado(dados):
 
     try:
         if not adquirir_processamento(order_id, email):
+            # paid pode ter chegado primeiro. Nunca readquire estado de cancelamento;
+            # usa a entrega tardia apenas como nova chance de reconciliar unsubscribe.
+            reconciliar_cancelamento(order_id, email)
             return
 
-        # Reserva atomicamente o direito de chamar o Kit. Se paid criou uma
-        # tombstone cancelled antes daqui, esta transicao falha e nada e enviado.
         if not transicionar(order_id, "processing", "subscribing"):
+            reconciliar_cancelamento(order_id, email)
             return
 
-        sucesso = _alterar_tag_kit(email, "subscribe")
-        if not sucesso:
+        try:
+            sucesso = _alterar_tag_kit(email, "subscribe")
+        except Exception as exc:
+            print(f"[PIX Recovery] Resultado ambiguo do subscribe: {str(exc)}")
+            # Timeout pode significar que a tag foi aplicada. Se paid venceu a
+            # corrida, tentamos remover a tag antes de qualquer retry futuro.
+            if reconciliar_cancelamento(order_id, email):
+                return
             transicionar(order_id, "subscribing", "failed")
             return
 
-        # completed so pode substituir subscribing. Se paid venceu a corrida e
-        # gravou cancelled, compensamos removendo a tag que acabou de ser aplicada.
+        if not sucesso:
+            if reconciliar_cancelamento(order_id, email):
+                return
+            transicionar(order_id, "subscribing", "failed")
+            return
+
+        # Se paid venceu depois do subscribe, completed falha por CAS e fazemos
+        # unsubscribe compensatorio duravel via estado pending.
         if not transicionar(order_id, "subscribing", "completed"):
-            try:
-                _alterar_tag_kit(email, "unsubscribe")
-            except Exception as exc:
-                print(f"[PIX Recovery] Falha na compensacao de tag: {str(exc)}")
+            reconciliar_cancelamento(order_id, email)
 
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao iniciar recovery: {str(exc)}")
         try:
-            transicionar(order_id, "subscribing", "failed")
+            if not reconciliar_cancelamento(order_id, email):
+                transicionar(order_id, "subscribing", "failed")
         except Exception:
             pass
 
@@ -173,17 +231,12 @@ def cancelar_pix_por_pagamento(dados):
         return
 
     try:
-        # Persistimos a intencao terminal ANTES da chamada externa. Assim paid
-        # anterior, posterior ou concorrente nunca permite reativar a mesma order_id.
+        # Primeiro grava estado terminal para aquisicao. A remocao externa fica
+        # explicitamente pendente ate o Kit confirmar sucesso.
         if not persistir_cancelamento(order_id, email):
             return
 
-        email_para_remover = email or buscar_email_ledger(order_id)
-        if not email_para_remover:
-            return
-
-        if not _alterar_tag_kit(email_para_remover, "unsubscribe"):
-            print(f"[PIX Recovery] Cancelamento persistido, mas tag nao removida: {order_id}")
+        reconciliar_cancelamento(order_id, email)
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao cancelar recovery: {str(exc)}")
 
