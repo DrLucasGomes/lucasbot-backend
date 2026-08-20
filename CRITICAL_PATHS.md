@@ -76,15 +76,20 @@ Invariantes que não podem ser quebradas:
 - `/kiwify` original deve ser executado uma única vez e antes da camada adicional PIX;
 - JSON inválido deve preservar o comportamento da rota original;
 - `order_id` é a identidade operacional da recuperação PIX;
-- `cancelled` é terminal e deve existir mesmo se `paid` chegar antes de `pix_created`;
-- nunca readquirir `cancelled` ou `completed`;
-- transições para `completed/failed` devem ser compare-and-set e jamais sobrescrever `cancelled`;
+- pagamento deve persistir `cancelled_pending_unsubscribe` antes de qualquer chamada ao Kit, inclusive se chegar antes de `pix_created`;
+- `cancelled_pending_unsubscribe`, `cancelled` e `completed` nunca podem ser readquiridos para subscribe;
+- `cancelled` só significa que o unsubscribe remoto foi confirmado; falha externa deixa o estado pending para retry/reconciliação;
+- as únicas transições normais permitidas pela RPC são `processing -> subscribing`, `subscribing -> completed` e `subscribing -> failed`;
 - antes do subscribe, exigir `processing -> subscribing` atômico;
-- se o subscribe ocorrer e `paid` vencer a corrida, executar `unsubscribe` compensatório;
+- `completed/failed` jamais podem sobrescrever estado de cancelamento;
+- timeout/exceção ambígua do subscribe deve verificar/reconciliar cancelamento antes de marcar `failed`;
+- se o subscribe ocorrer e `paid` vencer a corrida, executar unsubscribe compensatório e confirmar `cancelled` somente depois do sucesso remoto;
+- nova entrega de `paid` ou `pix_created` pode ser usada como nova oportunidade de reconciliar `cancelled_pending_unsubscribe`, mas nunca para reativar a recuperação;
 - `failed` pode ser retomado e `processing/subscribing` stale podem ser readquiridos após lease de 5 minutos;
-- persistir o cancelamento antes de tentar `unsubscribe` no Kit;
 - falha da camada PIX não pode impedir o processamento normal de compra/abandono no `/kiwify`;
-- não persistir nem logar CPF, IP, `pix_code` ou dados de pagamento desnecessários;
-- não reutilizar `TAG_ABANDONO_ID`; PIX usa `TAG_PIX_ID` próprio.
+- não persistir nem logar CPF, IP, `pix_code`, QR Code ou dados de pagamento desnecessários;
+- não reutilizar `TAG_ABANDONO_ID`; PIX usa `TAG_PIX_ID` próprio;
+- RPCs `SECURITY DEFINER` devem revogar `EXECUTE` de `PUBLIC`, `anon` e `authenticated` e conceder apenas a `service_role`;
+- instalação limpa usa `005_create_recovery_pix_orders.sql`; ambientes que possam ter recebido uma 005 anterior devem também executar `006_upgrade_recovery_pix_orders.sql`.
 
-Antes do merge da recuperação PIX, exigir testes para: contrato válido, método/status/evento incorretos, `order_id` ausente, duplicata, concorrência entre dois PIX, `paid` antes do PIX, `paid` durante o subscribe, `paid` depois do PIX, falha do Kit, falha de transição, recuperação stale, JSON inválido e regressão de `cart_abandoned`/`paid` normal. A migration `005_create_recovery_pix_orders.sql`, o ID da tag no Render e um teste E2E real no Supabase/Kit são obrigatórios antes de produção.
+Antes do merge da recuperação PIX, exigir testes para: contrato válido, método/status/evento incorretos, `order_id` ausente, duplicata, concorrência entre dois PIX, `paid` antes do PIX, `paid` durante o subscribe, timeout ambíguo, falha e retry de unsubscribe, `paid` depois do PIX, falha do Kit, falha de transição, recuperação stale, terminalidade dos estados, permissões das RPCs, JSON inválido e regressão de `cart_abandoned`/`paid` normal. A migration no Supabase, o ID da tag no Render e um teste E2E real Supabase/Kit são obrigatórios antes de produção.
