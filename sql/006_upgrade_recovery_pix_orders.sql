@@ -7,27 +7,46 @@ alter table if exists public.recovery_pix_orders
 alter table if exists public.recovery_pix_orders
     add column if not exists attempt_token text;
 
-alter table if exists public.recovery_pix_orders
-    add column if not exists subscribe_attempted boolean not null default false;
+-- O backfill conservador de subscribe_attempted deve acontecer APENAS quando a
+-- coluna ainda nao existe. Isso torna a migration semanticamente idempotente:
+-- reaplicar a 006 nao pode reinterpretar ordens novas ja corretamente migradas.
+do $$
+declare
+    subscribe_attempted_ja_existia boolean;
+begin
+    select exists (
+        select 1
+          from information_schema.columns
+         where table_schema = 'public'
+           and table_name = 'recovery_pix_orders'
+           and column_name = 'subscribe_attempted'
+    ) into subscribe_attempted_ja_existia;
 
--- Converte estados antigos de forma conservadora: se a ordem ja chegou a
--- subscribing/completed/failed/cancelamento, assumimos que pode ter existido
--- um efeito remoto de subscribe e preservamos isso para reconciliacao segura.
-update public.recovery_pix_orders
-   set subscribe_attempted = true
- where status in (
-    'subscribing',
-    'completed',
-    'failed',
-    'cancelled_pending_unsubscribe',
-    'cancelled'
- );
+    if not subscribe_attempted_ja_existia then
+        alter table public.recovery_pix_orders
+            add column subscribe_attempted boolean not null default false;
 
--- Cancelled antigo com tentativa conhecida volta a pending detectavel.
-update public.recovery_pix_orders
-   set status = 'cancelled_pending_unsubscribe'
- where status = 'cancelled'
-   and subscribe_attempted = true;
+        -- Converte somente dados do schema legado. Estados que ja chegaram a
+        -- subscribing/completed/failed/cancelamento sao tratados de forma
+        -- conservadora como tendo possivel efeito remoto de subscribe.
+        update public.recovery_pix_orders
+           set subscribe_attempted = true
+         where status in (
+            'subscribing',
+            'completed',
+            'failed',
+            'cancelled_pending_unsubscribe',
+            'cancelled'
+         );
+
+        -- Cancelled legado com tentativa conhecida volta a pending detectavel.
+        update public.recovery_pix_orders
+           set status = 'cancelled_pending_unsubscribe'
+         where status = 'cancelled'
+           and subscribe_attempted = true;
+    end if;
+end;
+$$;
 
 alter table if exists public.recovery_pix_orders
     alter column email drop not null;
