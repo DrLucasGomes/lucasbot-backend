@@ -12,7 +12,6 @@ router = APIRouter(tags=["kiwify-pix-recovery"])
 PIX_TABLE = "recovery_pix_orders"
 KIT_BASE_URL = "https://api.convertkit.com/v3"
 PROCESSING_STALE_MINUTES = 5
-STATUS_CANCELAMENTO = {"cancelled_pending_unsubscribe", "cancelled"}
 
 
 def _ordem(dados):
@@ -78,12 +77,7 @@ def adquirir_processamento(order_id: str, email: str, attempt_token: str) -> boo
     )
 
 
-def transicionar(
-    order_id: str,
-    attempt_token: str,
-    origem: str,
-    destino: str,
-) -> bool:
+def transicionar(order_id: str, attempt_token: str, origem: str, destino: str) -> bool:
     return _rpc_bool(
         "recovery_pix_transition",
         {
@@ -124,7 +118,7 @@ def buscar_ledger(order_id: str) -> dict:
         f"{URL}/rest/v1/{PIX_TABLE}",
         params={
             "order_id": f"eq.{order_id}",
-            "select": "email,status,attempt_token",
+            "select": "email,status,attempt_token,subscribe_attempted",
             "limit": "1",
         },
         headers=obter_headers_supabase(),
@@ -155,11 +149,14 @@ def _alterar_tag_kit(email: str, acao: str) -> bool:
     return resposta.status_code in (200, 201, 204)
 
 
-def reconciliar_cancelamento(
-    order_id: str,
-    email_preferido: str = "",
-    confirmar: bool = True,
-) -> bool:
+def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
+    """Remove a tag quando o ledger esta pending.
+
+    Se a ordem alguma vez tentou subscribe, um unsubscribe bem-sucedido NAO
+    transforma automaticamente o ledger em cancelled. Mantemos pending como
+    evidencia duravel contra efeitos remotos tardios. A finalizacao desse caso
+    exige uma reconciliacao posterior explicita.
+    """
     ledger = buscar_ledger(order_id)
     status = _texto(ledger.get("status")).lower()
     if status == "cancelled":
@@ -181,35 +178,21 @@ def reconciliar_cancelamento(
         print(f"[PIX Recovery] Unsubscribe pendente para order_id: {order_id}")
         return False
 
-    if not confirmar:
-        # Em resultado remoto ambiguo do subscribe, a remocao ocorreu depois do
-        # timeout local, mas o servidor remoto ainda pode concluir o subscribe
-        # tardiamente. Mantemos pending detectavel para uma reconciliacao futura.
+    if bool(ledger.get("subscribe_attempted")):
+        # Nao escondemos uma possivel entrega tardia de subscribe. O pending
+        # continua observavel e futuros eventos podem repetir unsubscribe.
         return True
 
     return confirmar_cancelamento(order_id)
 
 
-def compensar_subscribe_concorrente(
-    order_id: str,
-    email: str,
-    attempt_token: str,
-    resultado_ambiguo: bool = False,
-) -> bool:
-    # O worker que efetivamente tentou subscribe pode reabrir cancelled para
-    # pending somente se ainda possui o fencing token daquela tentativa.
-    if not reabrir_cancelamento(order_id, attempt_token):
-        return reconciliar_cancelamento(
-            order_id,
-            email,
-            confirmar=not resultado_ambiguo,
-        )
-
-    return reconciliar_cancelamento(
-        order_id,
-        email,
-        confirmar=not resultado_ambiguo,
-    )
+def compensar_subscribe_concorrente(order_id: str, email: str, attempt_token: str) -> bool:
+    # Se este token ainda for a tentativa conhecida, reabre cancelled para
+    # pending. Se ja houve readquisicao stale e o token mudou, o marcador
+    # subscribe_attempted preservado no ledger faz o cancelamento permanecer
+    # pending quando paid voltar a reconciliar.
+    reabrir_cancelamento(order_id, attempt_token)
+    return reconciliar_cancelamento(order_id, email)
 
 
 def processar_pix_criado(dados):
@@ -226,12 +209,7 @@ def processar_pix_criado(dados):
             reconciliar_cancelamento(order_id, email)
             return
 
-        if not transicionar(
-            order_id,
-            attempt_token,
-            "processing",
-            "subscribing",
-        ):
+        if not transicionar(order_id, attempt_token, "processing", "subscribing"):
             reconciliar_cancelamento(order_id, email)
             return
 
@@ -239,58 +217,25 @@ def processar_pix_criado(dados):
             sucesso = _alterar_tag_kit(email, "subscribe")
         except Exception as exc:
             print(f"[PIX Recovery] Resultado ambiguo do subscribe: {str(exc)}")
-            if compensar_subscribe_concorrente(
-                order_id,
-                email,
-                attempt_token,
-                resultado_ambiguo=True,
-            ):
+            if compensar_subscribe_concorrente(order_id, email, attempt_token):
                 return
-            transicionar(
-                order_id,
-                attempt_token,
-                "subscribing",
-                "failed",
-            )
+            transicionar(order_id, attempt_token, "subscribing", "failed")
             return
 
         if not sucesso:
             if compensar_subscribe_concorrente(order_id, email, attempt_token):
                 return
-            transicionar(
-                order_id,
-                attempt_token,
-                "subscribing",
-                "failed",
-            )
+            transicionar(order_id, attempt_token, "subscribing", "failed")
             return
 
-        if not transicionar(
-            order_id,
-            attempt_token,
-            "subscribing",
-            "completed",
-        ):
-            # Se paid ja confirmou cancelled antes do subscribe antigo retornar,
-            # reabrimos cancelled -> pending com o fencing token e executamos um
-            # novo unsubscribe depois do subscribe conhecido.
+        if not transicionar(order_id, attempt_token, "subscribing", "completed"):
             compensar_subscribe_concorrente(order_id, email, attempt_token)
 
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao iniciar recovery: {str(exc)}")
         try:
-            if not compensar_subscribe_concorrente(
-                order_id,
-                email,
-                attempt_token,
-                resultado_ambiguo=True,
-            ):
-                transicionar(
-                    order_id,
-                    attempt_token,
-                    "subscribing",
-                    "failed",
-                )
+            if not compensar_subscribe_concorrente(order_id, email, attempt_token):
+                transicionar(order_id, attempt_token, "subscribing", "failed")
         except Exception:
             pass
 
