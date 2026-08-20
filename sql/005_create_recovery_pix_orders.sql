@@ -2,7 +2,14 @@ create table if not exists public.recovery_pix_orders (
     order_id text primary key,
     email text,
     status text not null default 'processing'
-        check (status in ('processing', 'subscribing', 'completed', 'failed', 'cancelled')),
+        check (status in (
+            'processing',
+            'subscribing',
+            'completed',
+            'failed',
+            'cancelled_pending_unsubscribe',
+            'cancelled'
+        )),
     processing_started_at timestamptz,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
@@ -11,6 +18,7 @@ create table if not exists public.recovery_pix_orders (
 create or replace function public.set_recovery_pix_orders_updated_at()
 returns trigger
 language plpgsql
+set search_path = pg_catalog, public
 as $$
 begin
     new.updated_at = now();
@@ -32,8 +40,6 @@ create index if not exists idx_recovery_pix_orders_email
 create index if not exists idx_recovery_pix_orders_status
     on public.recovery_pix_orders (status);
 
--- Adquire uma ordem PIX nova ou recupera uma tentativa falha/stale.
--- cancelled e completed sao terminais e nunca podem ser readquiridos.
 create or replace function public.recovery_pix_acquire(
     p_order_id text,
     p_email text,
@@ -42,12 +48,13 @@ create or replace function public.recovery_pix_acquire(
 returns boolean
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
     affected integer := 0;
 begin
-    if p_order_id is null or btrim(p_order_id) = '' or p_email is null or btrim(p_email) = '' then
+    if p_order_id is null or btrim(p_order_id) = ''
+       or p_email is null or btrim(p_email) = '' then
         return false;
     end if;
 
@@ -81,7 +88,6 @@ begin
 end;
 $$;
 
--- Compare-and-set de estado. Evita que completed/failed sobrescrevam cancelled.
 create or replace function public.recovery_pix_transition(
     p_order_id text,
     p_from_status text,
@@ -90,13 +96,16 @@ create or replace function public.recovery_pix_transition(
 returns boolean
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 declare
     affected integer := 0;
 begin
-    if p_from_status not in ('processing', 'subscribing')
-       or p_to_status not in ('subscribing', 'completed', 'failed') then
+    if not (
+        (p_from_status = 'processing' and p_to_status = 'subscribing')
+        or (p_from_status = 'subscribing' and p_to_status = 'completed')
+        or (p_from_status = 'subscribing' and p_to_status = 'failed')
+    ) then
         return false;
     end if;
 
@@ -114,8 +123,8 @@ begin
 end;
 $$;
 
--- Pagamento cria tombstone cancelled mesmo que pix_created ainda nao tenha chegado.
--- cancelled e terminal e impede qualquer aquisicao posterior da mesma order_id.
+-- Pagamento persiste primeiro uma tombstone que bloqueia qualquer nova aquisicao.
+-- A remocao da tag externa e confirmada separadamente para permitir retry duravel.
 create or replace function public.recovery_pix_cancel(
     p_order_id text,
     p_email text default null
@@ -123,7 +132,7 @@ create or replace function public.recovery_pix_cancel(
 returns boolean
 language plpgsql
 security definer
-set search_path = public
+set search_path = pg_catalog, public
 as $$
 begin
     if p_order_id is null or btrim(p_order_id) = '' then
@@ -131,11 +140,59 @@ begin
     end if;
 
     insert into public.recovery_pix_orders (order_id, email, status)
-    values (p_order_id, nullif(btrim(coalesce(p_email, '')), ''), 'cancelled')
+    values (
+        p_order_id,
+        nullif(btrim(coalesce(p_email, '')), ''),
+        'cancelled_pending_unsubscribe'
+    )
     on conflict (order_id) do update
-       set status = 'cancelled',
+       set status = case
+               when public.recovery_pix_orders.status = 'cancelled'
+                   then 'cancelled'
+               else 'cancelled_pending_unsubscribe'
+           end,
            email = coalesce(excluded.email, public.recovery_pix_orders.email);
 
     return true;
 end;
 $$;
+
+create or replace function public.recovery_pix_confirm_cancel(
+    p_order_id text
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    affected integer := 0;
+begin
+    update public.recovery_pix_orders
+       set status = 'cancelled'
+     where order_id = p_order_id
+       and status = 'cancelled_pending_unsubscribe';
+
+    get diagnostics affected = row_count;
+    if affected = 1 then
+        return true;
+    end if;
+
+    return exists (
+        select 1
+          from public.recovery_pix_orders
+         where order_id = p_order_id
+           and status = 'cancelled'
+    );
+end;
+$$;
+
+revoke execute on function public.recovery_pix_acquire(text, text, integer) from public, anon, authenticated;
+revoke execute on function public.recovery_pix_transition(text, text, text) from public, anon, authenticated;
+revoke execute on function public.recovery_pix_cancel(text, text) from public, anon, authenticated;
+revoke execute on function public.recovery_pix_confirm_cancel(text) from public, anon, authenticated;
+
+grant execute on function public.recovery_pix_acquire(text, text, integer) to service_role;
+grant execute on function public.recovery_pix_transition(text, text, text) to service_role;
+grant execute on function public.recovery_pix_cancel(text, text) to service_role;
+grant execute on function public.recovery_pix_confirm_cancel(text) to service_role;
