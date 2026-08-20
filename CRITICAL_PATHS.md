@@ -76,22 +76,23 @@ Invariantes que não podem ser quebradas:
 - `/kiwify` original deve ser executado uma única vez e antes da camada adicional PIX;
 - JSON inválido deve preservar o comportamento da rota original;
 - `order_id` é a identidade operacional da recuperação PIX;
-- cada tentativa de trabalho usa `attempt_token` único como fencing token;
-- stale retry troca o `attempt_token`, impedindo worker antigo de concluir ou falhar a tentativa nova;
-- pagamento deve persistir `cancelled_pending_unsubscribe` antes de qualquer chamada ao Kit, inclusive se chegar antes de `pix_created`;
-- `cancelled_pending_unsubscribe`, `cancelled` e `completed` nunca podem ser readquiridos para subscribe;
-- `cancelled` só deve ser terminal em relação ao último subscribe conhecido; se um worker que tentou subscribe retornar depois do cancelamento, ele deve reabrir `cancelled -> cancelled_pending_unsubscribe` usando o fencing token antes de compensar;
-- somente o worker cujo `attempt_token` ainda corresponde ao ledger pode executar CAS de `processing/subscribing` ou reabrir cancelamento;
-- as únicas transições normais permitidas pela RPC são `processing -> subscribing`, `subscribing -> completed` e `subscribing -> failed`;
-- `completed/failed` jamais podem sobrescrever estado de cancelamento;
-- timeout/exceção ambígua do subscribe não pode terminar silenciosamente em `cancelled`: mesmo após unsubscribe compensatório bem-sucedido, manter pending detectável até reconciliação posterior;
-- subscribe confirmado que perde CAS para `completed` deve gerar um novo unsubscribe depois desse subscribe conhecido e só então pode confirmar `cancelled`;
-- nova entrega de `paid` ou `pix_created` pode ser usada como oportunidade de reconciliar `cancelled_pending_unsubscribe`, mas nunca para reativar a recuperação;
-- `failed` pode ser retomado e `processing/subscribing` stale podem ser readquiridos após lease de 5 minutos;
-- falha da camada PIX não pode impedir o processamento normal de compra/abandono no `/kiwify`;
-- não persistir nem logar CPF, IP, `pix_code`, QR Code ou dados de pagamento desnecessários;
-- não reutilizar `TAG_ABANDONO_ID`; PIX usa `TAG_PIX_ID` próprio;
-- RPCs `SECURITY DEFINER` devem revogar `EXECUTE` de `PUBLIC`, `anon` e `authenticated` e conceder apenas a `service_role`;
-- instalação limpa usa `005_create_recovery_pix_orders.sql`; ambientes que possam ter recebido uma 005 anterior devem também executar `006_upgrade_recovery_pix_orders.sql`.
+- cada tentativa usa `attempt_token` único como fencing token para CAS local;
+- `subscribe_attempted` é monotônico: uma vez `true`, nunca volta para `false`, inclusive após retry stale com token novo;
+- `processing -> subscribing` deve marcar `subscribe_attempted=true` atomicamente;
+- pagamento persiste `cancelled_pending_unsubscribe` antes de chamar o Kit;
+- se `subscribe_attempted=false`, unsubscribe confirmado pode permitir `cancelled`;
+- se `subscribe_attempted=true`, **não confirmar `cancelled` automaticamente**, mesmo após unsubscribe bem-sucedido; manter pending detectável para que efeito remoto tardio de qualquer tentativa antiga nunca fique escondido;
+- `cancelled_pending_unsubscribe`, `cancelled` e `completed` não podem ser readquiridos para subscribe;
+- stale retry troca `attempt_token`, mas nunca apaga o histórico monotônico de que houve subscribe tentado;
+- worker antigo não pode concluir/falhar tentativa nova; se seu token já perdeu autoridade, a segurança contra efeito remoto tardio vem de `subscribe_attempted`, não de reabrir o token atual;
+- `recovery_pix_reopen_cancel` exige token correspondente e `subscribe_attempted=true`;
+- as únicas transições normais são `processing -> subscribing`, `subscribing -> completed` e `subscribing -> failed`;
+- falha/timeout de unsubscribe mantém pending;
+- nova entrega de `paid` ou `pix_created` pode repetir reconciliação pending sem reativar recovery;
+- falha da camada PIX não pode impedir compra/abandono no `/kiwify`;
+- não persistir/logar CPF, IP, `pix_code`, QR Code ou payload de pagamento;
+- PIX usa `TAG_PIX_ID` próprio, nunca `TAG_ABANDONO_ID`;
+- RPCs `SECURITY DEFINER` são restritas a `service_role`;
+- instalação limpa usa `005_create_recovery_pix_orders.sql`; upgrade defensivo usa também `006_upgrade_recovery_pix_orders.sql`.
 
-Antes do merge da recuperação PIX, exigir testes para: contrato válido, método/status/evento incorretos, `order_id` ausente, duplicata, concorrência entre dois PIX, stale retry com token novo, worker antigo tentando concluir, `paid` antes do PIX, `paid` durante o subscribe, subscribe tardio depois de unsubscribe, timeout ambíguo, falha e retry de unsubscribe, falha de transição, terminalidade dos estados, permissões das RPCs, JSON inválido e regressão de `cart_abandoned`/`paid` normal. A migration no Supabase, o ID da tag no Render e um teste E2E real Supabase/Kit são obrigatórios antes de produção.
+Antes do merge, testar explicitamente o cenário adversarial: tentativa OLD chega a `subscribing`, fica stale, tentativa NEW substitui token, `paid` executa unsubscribe e depois o subscribe remoto OLD é efetivado. O estado local **não pode estar `cancelled`** nesse cenário; deve permanecer `cancelled_pending_unsubscribe` porque `subscribe_attempted=true`. Também são obrigatórios testes de concorrência real/RPCs no Supabase, permissões, JSON inválido, regressão de `cart_abandoned`/`paid`, tag do Kit e E2E Kiwify -> Render -> Supabase -> Kit.
