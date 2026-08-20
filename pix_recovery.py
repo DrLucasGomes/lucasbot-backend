@@ -1,4 +1,5 @@
 import os
+from uuid import uuid4
 
 import requests
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -65,22 +66,29 @@ def _rpc_bool(nome: str, payload: dict) -> bool:
         return False
 
 
-def adquirir_processamento(order_id: str, email: str) -> bool:
+def adquirir_processamento(order_id: str, email: str, attempt_token: str) -> bool:
     return _rpc_bool(
         "recovery_pix_acquire",
         {
             "p_order_id": order_id,
             "p_email": email,
+            "p_attempt_token": attempt_token,
             "p_stale_minutes": PROCESSING_STALE_MINUTES,
         },
     )
 
 
-def transicionar(order_id: str, origem: str, destino: str) -> bool:
+def transicionar(
+    order_id: str,
+    attempt_token: str,
+    origem: str,
+    destino: str,
+) -> bool:
     return _rpc_bool(
         "recovery_pix_transition",
         {
             "p_order_id": order_id,
+            "p_attempt_token": attempt_token,
             "p_from_status": origem,
             "p_to_status": destino,
         },
@@ -91,6 +99,13 @@ def persistir_cancelamento(order_id: str, email: str | None) -> bool:
     return _rpc_bool(
         "recovery_pix_cancel",
         {"p_order_id": order_id, "p_email": email or None},
+    )
+
+
+def reabrir_cancelamento(order_id: str, attempt_token: str) -> bool:
+    return _rpc_bool(
+        "recovery_pix_reopen_cancel",
+        {"p_order_id": order_id, "p_attempt_token": attempt_token},
     )
 
 
@@ -109,7 +124,7 @@ def buscar_ledger(order_id: str) -> dict:
         f"{URL}/rest/v1/{PIX_TABLE}",
         params={
             "order_id": f"eq.{order_id}",
-            "select": "email,status",
+            "select": "email,status,attempt_token",
             "limit": "1",
         },
         headers=obter_headers_supabase(),
@@ -126,10 +141,6 @@ def buscar_ledger(order_id: str) -> dict:
     return {}
 
 
-def buscar_email_ledger(order_id: str) -> str:
-    return _texto(buscar_ledger(order_id).get("email"))
-
-
 def _alterar_tag_kit(email: str, acao: str) -> bool:
     api_key = os.getenv("CONVERTKIT_API_KEY")
     tag_id = os.getenv("TAG_PIX_ID")
@@ -144,12 +155,11 @@ def _alterar_tag_kit(email: str, acao: str) -> bool:
     return resposta.status_code in (200, 201, 204)
 
 
-def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
-    """Tenta convergir ledger cancelado e tag remota para o mesmo estado.
-
-    O estado pending e duravel. Se o Kit falhar, futuras entregas de paid ou
-    pix_created podem repetir esta reconciliacao sem reativar a recuperacao.
-    """
+def reconciliar_cancelamento(
+    order_id: str,
+    email_preferido: str = "",
+    confirmar: bool = True,
+) -> bool:
     ledger = buscar_ledger(order_id)
     status = _texto(ledger.get("status")).lower()
     if status == "cancelled":
@@ -171,7 +181,35 @@ def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
         print(f"[PIX Recovery] Unsubscribe pendente para order_id: {order_id}")
         return False
 
+    if not confirmar:
+        # Em resultado remoto ambiguo do subscribe, a remocao ocorreu depois do
+        # timeout local, mas o servidor remoto ainda pode concluir o subscribe
+        # tardiamente. Mantemos pending detectavel para uma reconciliacao futura.
+        return True
+
     return confirmar_cancelamento(order_id)
+
+
+def compensar_subscribe_concorrente(
+    order_id: str,
+    email: str,
+    attempt_token: str,
+    resultado_ambiguo: bool = False,
+) -> bool:
+    # O worker que efetivamente tentou subscribe pode reabrir cancelled para
+    # pending somente se ainda possui o fencing token daquela tentativa.
+    if not reabrir_cancelamento(order_id, attempt_token):
+        return reconciliar_cancelamento(
+            order_id,
+            email,
+            confirmar=not resultado_ambiguo,
+        )
+
+    return reconciliar_cancelamento(
+        order_id,
+        email,
+        confirmar=not resultado_ambiguo,
+    )
 
 
 def processar_pix_criado(dados):
@@ -181,14 +219,19 @@ def processar_pix_criado(dados):
     if not order_id or not email:
         return
 
+    attempt_token = str(uuid4())
+
     try:
-        if not adquirir_processamento(order_id, email):
-            # paid pode ter chegado primeiro. Nunca readquire estado de cancelamento;
-            # usa a entrega tardia apenas como nova chance de reconciliar unsubscribe.
+        if not adquirir_processamento(order_id, email, attempt_token):
             reconciliar_cancelamento(order_id, email)
             return
 
-        if not transicionar(order_id, "processing", "subscribing"):
+        if not transicionar(
+            order_id,
+            attempt_token,
+            "processing",
+            "subscribing",
+        ):
             reconciliar_cancelamento(order_id, email)
             return
 
@@ -196,29 +239,58 @@ def processar_pix_criado(dados):
             sucesso = _alterar_tag_kit(email, "subscribe")
         except Exception as exc:
             print(f"[PIX Recovery] Resultado ambiguo do subscribe: {str(exc)}")
-            # Timeout pode significar que a tag foi aplicada. Se paid venceu a
-            # corrida, tentamos remover a tag antes de qualquer retry futuro.
-            if reconciliar_cancelamento(order_id, email):
+            if compensar_subscribe_concorrente(
+                order_id,
+                email,
+                attempt_token,
+                resultado_ambiguo=True,
+            ):
                 return
-            transicionar(order_id, "subscribing", "failed")
+            transicionar(
+                order_id,
+                attempt_token,
+                "subscribing",
+                "failed",
+            )
             return
 
         if not sucesso:
-            if reconciliar_cancelamento(order_id, email):
+            if compensar_subscribe_concorrente(order_id, email, attempt_token):
                 return
-            transicionar(order_id, "subscribing", "failed")
+            transicionar(
+                order_id,
+                attempt_token,
+                "subscribing",
+                "failed",
+            )
             return
 
-        # Se paid venceu depois do subscribe, completed falha por CAS e fazemos
-        # unsubscribe compensatorio duravel via estado pending.
-        if not transicionar(order_id, "subscribing", "completed"):
-            reconciliar_cancelamento(order_id, email)
+        if not transicionar(
+            order_id,
+            attempt_token,
+            "subscribing",
+            "completed",
+        ):
+            # Se paid ja confirmou cancelled antes do subscribe antigo retornar,
+            # reabrimos cancelled -> pending com o fencing token e executamos um
+            # novo unsubscribe depois do subscribe conhecido.
+            compensar_subscribe_concorrente(order_id, email, attempt_token)
 
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao iniciar recovery: {str(exc)}")
         try:
-            if not reconciliar_cancelamento(order_id, email):
-                transicionar(order_id, "subscribing", "failed")
+            if not compensar_subscribe_concorrente(
+                order_id,
+                email,
+                attempt_token,
+                resultado_ambiguo=True,
+            ):
+                transicionar(
+                    order_id,
+                    attempt_token,
+                    "subscribing",
+                    "failed",
+                )
         except Exception:
             pass
 
@@ -231,8 +303,6 @@ def cancelar_pix_por_pagamento(dados):
         return
 
     try:
-        # Primeiro grava estado terminal para aquisicao. A remocao externa fica
-        # explicitamente pendente ate o Kit confirmar sucesso.
         if not persistir_cancelamento(order_id, email):
             return
 
@@ -243,8 +313,6 @@ def cancelar_pix_por_pagamento(dados):
 
 @router.post("/kiwify")
 async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundTasks):
-    # Executa primeiro a rota original. Isso preserva inclusive o comportamento
-    # de JSON invalido e garante que a camada PIX jamais impeça o fluxo principal.
     resposta = await webhook_kiwify(request, background_tasks)
 
     try:
