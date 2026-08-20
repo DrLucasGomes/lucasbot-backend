@@ -61,7 +61,7 @@ O ledger PIX não persiste CPF, IP, `pix_code`, QR Code ou payload completo. O m
 
 ## Migrations
 
-`005_create_recovery_pix_orders.sql` representa a instalação limpa. `006_upgrade_recovery_pix_orders.sql` é upgrade defensivo e idempotente: adiciona `attempt_token` e `subscribe_attempted`, marca conservadoramente estados antigos como tentativa de subscribe quando necessário, converte `cancelled` antigo suspeito para pending, ajusta schema/RPCs e reaplica permissões.
+`005_create_recovery_pix_orders.sql` representa a instalação limpa. `006_upgrade_recovery_pix_orders.sql` é upgrade defensivo e semanticamente idempotente. O backfill conservador de `subscribe_attempted` roda somente quando a coluna está sendo introduzida; reaplicar a 006 em um schema já atualizado não reclassifica ordens novas. Na primeira execução sobre schema legado, a migration adiciona `attempt_token` e `subscribe_attempted`, marca conservadoramente estados antigos quando necessário, converte `cancelled` antigo suspeito para pending, ajusta schema/RPCs e reaplica permissões.
 
 ## Consequências
 
