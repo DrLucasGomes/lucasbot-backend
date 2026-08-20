@@ -13,10 +13,12 @@ Antes de alterar um ponto crítico:
 1. Crie uma branch dedicada.
 2. Rode `pytest` e confirme a linha de base.
 3. Faça a mudança com o menor escopo possível.
-4. Rode novamente toda a suíte.
-5. Revise o diff, incluindo migrations e contratos HTTP.
-6. Abra um PR com riscos e evidências de teste.
-7. Aguarde a CI verde antes do merge.
+4. Peça uma auditoria adversarial no VS Code/Codex antes do merge, com perguntas explícitas sobre regressão, concorrência, ordenação, idempotência, retry e exposição de dados.
+5. Corrija os riscos encontrados e rode novamente toda a suíte.
+6. Revise o diff, incluindo migrations e contratos HTTP.
+7. Atualize `ARCHITECTURE.md`, `CRITICAL_PATHS.md` e ADRs quando houver decisão estrutural.
+8. Abra um PR com riscos e evidências de teste.
+9. Aguarde a CI verde antes do merge.
 
 Para mudanças em jornada, confirme especialmente a preservação de `manychat_id`, `journey_run_id` e `dedupe_key`, o comportamento best-effort e a ausência de updates ou deletes em `journey_events`.
 
@@ -57,3 +59,32 @@ Antes de considerar mudanças futuras prontas, validar:
 8. após o E-mail 1, um `paid` remove o contato da recuperação e impede E-mails 2 e 3.
 
 Os itens 1 a 7 foram validados para a implementação atual, incluindo atribuição sintética do E-mail 1. O item 8 está em validação final com a cadência real da sequência.
+
+## Recuperação PIX
+
+PIX gerado, abandono de checkout e play da VSL são gatilhos diferentes e devem permanecer isolados.
+
+Contrato operacional confirmado da Kiwify para entrada PIX:
+
+- `webhook_event_type = pix_created`;
+- `order_status = waiting_payment`;
+- `payment_method = pix`;
+- `order_id` obrigatório.
+
+Invariantes que não podem ser quebradas:
+
+- `/kiwify` original deve ser executado uma única vez e antes da camada adicional PIX;
+- JSON inválido deve preservar o comportamento da rota original;
+- `order_id` é a identidade operacional da recuperação PIX;
+- `cancelled` é terminal e deve existir mesmo se `paid` chegar antes de `pix_created`;
+- nunca readquirir `cancelled` ou `completed`;
+- transições para `completed/failed` devem ser compare-and-set e jamais sobrescrever `cancelled`;
+- antes do subscribe, exigir `processing -> subscribing` atômico;
+- se o subscribe ocorrer e `paid` vencer a corrida, executar `unsubscribe` compensatório;
+- `failed` pode ser retomado e `processing/subscribing` stale podem ser readquiridos após lease de 5 minutos;
+- persistir o cancelamento antes de tentar `unsubscribe` no Kit;
+- falha da camada PIX não pode impedir o processamento normal de compra/abandono no `/kiwify`;
+- não persistir nem logar CPF, IP, `pix_code` ou dados de pagamento desnecessários;
+- não reutilizar `TAG_ABANDONO_ID`; PIX usa `TAG_PIX_ID` próprio.
+
+Antes do merge da recuperação PIX, exigir testes para: contrato válido, método/status/evento incorretos, `order_id` ausente, duplicata, concorrência entre dois PIX, `paid` antes do PIX, `paid` durante o subscribe, `paid` depois do PIX, falha do Kit, falha de transição, recuperação stale, JSON inválido e regressão de `cart_abandoned`/`paid` normal. A migration `005_create_recovery_pix_orders.sql`, o ID da tag no Render e um teste E2E real no Supabase/Kit são obrigatórios antes de produção.
