@@ -30,6 +30,10 @@ Eventos históricos sem `journey_run_id` são aceitos por compatibilidade. Eles 
 
 A instrumentação de jornada é adicional. Ela não altera os contratos de `/webhook`, `/kiwify`, tracking, `leads_vigor` ou `click_sessions`.
 
+## Disciplina de revisão
+
+Mudanças em caminhos críticos seguem branch dedicada, auditoria adversarial no VS Code/Codex, suíte completa de testes, revisão de diff e atualização documental antes do merge. A revisão do Codex é usada como segunda camada para procurar regressões, concorrência, falhas de ordenação, idempotência incompleta e efeitos externos duplicados; ela não substitui testes E2E reais.
+
 ## Recuperação após o play da VSL
 
 `POST /recovery/video-play` é o gatilho operacional do primeiro play elegível da VSL do Vigor 360. Esse fluxo é independente do clique no checkout e de `cart_abandoned`.
@@ -47,3 +51,22 @@ Os CTAs da sequência usam `utm_source=kit`, `utm_medium=email`, `utm_campaign=r
 O fluxo de compra continua responsável por aplicar `Comprador Vigor 360`, que deve remover o contato da sequência no Kit antes do próximo e-mail. A interrupção E2E após `paid` ainda está pendente de validação final.
 
 `journey_events` permanece telemetria e não participa da execução operacional da recuperação. Token assinado e `journey_run_id` na URL da VSL permanecem como hardening futuro.
+
+## Recuperação de PIX gerado e não pago
+
+O contrato real da Kiwify foi capturado em produção em 19/08/2026. Um PIX gerado chega em `POST /kiwify` com as condições simultâneas:
+
+- `webhook_event_type = pix_created`;
+- `order_status = waiting_payment`;
+- `payment_method = pix`;
+- `order_id` presente e estável.
+
+A recuperação PIX é isolada da lógica existente de abandono e compra. O wrapper executa primeiro o `/kiwify` original e somente depois agenda efeitos adicionais de PIX; falha na camada PIX não pode alterar a resposta do webhook principal.
+
+`recovery_pix_orders` usa `order_id` como chave primária. O banco controla aquisição e transições por funções RPC atômicas. `cancelled` e `completed` são estados terminais. `failed` pode ser readquirido e `processing/subscribing` stale podem ser retomados após 5 minutos.
+
+Pagamento confirmado cria primeiro uma tombstone `cancelled` por `order_id`, mesmo que `pix_created` ainda não tenha chegado. Isso impede que um evento PIX atrasado reative comprador. O fluxo PIX usa compare-and-set `processing -> subscribing -> completed/failed`; se `paid` vencer a corrida durante o subscribe no Kit, a transição para `completed` falha e o código executa `unsubscribe` compensatório.
+
+A tag de entrada será própria do PIX (`TAG_PIX_ID` no Render, tag `pix-gerado-vigor360` no Kit). O modelo entre Supabase e Kit é at-least-once: timeout ambíguo do Kit pode exigir retry, portanto não se promete exactly-once de efeito externo.
+
+A migration necessária é `sql/005_create_recovery_pix_orders.sql`. A feature permanece em branch de teste até migration, variável de ambiente, tag do Kit, auditoria Codex, suíte completa e teste E2E com um novo `pix_created` real serem aprovados.
