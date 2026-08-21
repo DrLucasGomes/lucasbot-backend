@@ -257,13 +257,32 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
     eh_pix = False
     eh_pago = False
 
-    # Classifica antes do handler original, enquanto o request ainda esta intacto.
-    # request.json() faz cache do corpo no Starlette; o handler original continua
-    # lendo o mesmo payload. Se o JSON for invalido, deixamos o original tratar.
+    # Instrumentacao temporaria: registra apenas a forma e os campos de
+    # classificacao do payload. Nao registra valores de cliente, PIX, IP,
+    # CPF, email, telefone, order_id ou outros dados sensiveis.
     try:
         dados = await request.json()
-        eh_pix = _evento_pix_criado(dados)
-        eh_pago = _evento_pago(dados)
+        if isinstance(dados, dict):
+            top_keys = sorted(str(k) for k in dados.keys())
+            ordem_debug = _ordem(dados)
+            print(f"[PIX SHAPE DEBUG] top_level_keys={top_keys}")
+            print(
+                "[PIX SHAPE DEBUG] "
+                f"order_found={bool(ordem_debug)} "
+                f"order_keys={sorted(str(k) for k in ordem_debug.keys()) if ordem_debug else []}"
+            )
+            print(
+                "[PIX SHAPE DEBUG] "
+                f"webhook_event_type={_texto(ordem_debug.get('webhook_event_type'))!r} "
+                f"payment_method={_texto(ordem_debug.get('payment_method'))!r} "
+                f"order_status={_texto(ordem_debug.get('order_status'))!r} "
+                f"has_order_id={bool(_texto(ordem_debug.get('order_id')))}"
+            )
+        else:
+            print(f"[PIX SHAPE DEBUG] top_level_type={type(dados).__name__}")
+
+        eh_pix = _evento_pix_criado(dados) if isinstance(dados, dict) else False
+        eh_pago = _evento_pago(dados) if isinstance(dados, dict) else False
         print(f"[PIX DEBUG] preclassified pix_created={eh_pix} paid={eh_pago}")
     except Exception as exc:
         print(f"[PIX DEBUG] preclassify_failed type={type(exc).__name__}")
