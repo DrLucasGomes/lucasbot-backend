@@ -15,8 +15,19 @@ PROCESSING_STALE_MINUTES = 5
 
 
 def _ordem(dados):
-    ordem = dados.get("order") or dados.get("Order") or {}
-    return ordem if isinstance(ordem, dict) else {}
+    if not isinstance(dados, dict):
+        return {}
+    ordem = dados.get("order") or dados.get("Order")
+    if isinstance(ordem, dict):
+        return ordem
+    # A Kiwify envia/reenvia alguns webhooks com os campos da ordem no
+    # proprio nivel raiz, sem o envelope {"order": {...}}.
+    if any(
+        chave in dados
+        for chave in ("order_id", "order_status", "payment_method", "webhook_event_type")
+    ):
+        return dados
+    return {}
 
 
 def _texto(valor):
