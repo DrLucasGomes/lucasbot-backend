@@ -89,6 +89,6 @@ As RPCs `SECURITY DEFINER` revogam `EXECUTE` de `PUBLIC`, `anon` e `authenticate
 
 A tag de entrada será própria do PIX (`TAG_PIX_ID` no Render, tag `pix-gerado-vigor360` no Kit). O ledger não persiste CPF, IP, `pix_code`, QR Code ou payload completo.
 
-A instalação limpa usa `sql/005_create_recovery_pix_orders.sql`. `sql/006_upgrade_recovery_pix_orders.sql` converge versões anteriores, adicionando `attempt_token` e `subscribe_attempted`; por segurança, estados antigos que indiquem possível subscribe são marcados como `subscribe_attempted=true`, e `cancelled` antigo suspeito volta a pending.
+A instalação limpa do ledger usa `sql/005_create_recovery_pix_orders.sql`. `sql/006_upgrade_recovery_pix_orders.sql` converge versões anteriores, `sql/007_create_recovery_pix_jobs.sql` cria a inbox durável e `sql/008_harden_recovery_pix_permissions.sql` aplica RLS/permissões finais tanto em instalações novas quanto já migradas.
 
-A feature permanece em branch de teste até auditoria Codex final, suíte completa, execução das migrations no Supabase, criação/configuração da tag e teste E2E real Kiwify -> Render -> Supabase -> Kit serem aprovados.
+O E2E real Kiwify -> Render -> Supabase -> Kit foi aprovado em 21/08/2026, incluindo falha inicial, retry após restart/reconciliação, conclusão na terceira tentativa, aplicação e remoção da tag PIX, preservação da tag de comprador e fila final sem candidatos.

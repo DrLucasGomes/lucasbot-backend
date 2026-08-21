@@ -689,8 +689,12 @@ def test_bootstrap_sem_monkeypatch_e_codigo_sem_debug_pix():
         "PIX SHAPE DEBUG",
         "PIX RPC DEBUG",
         "PIX KIT DEBUG",
+        "PIX FLOW",
+        "KIWIFY VERIFY",
     ):
         assert marcador not in codigo_combinado
+    assert "_kiwify_verify_log" not in codigo_pix
+    assert "_valor_kiwify_seguro_para_log" not in codigo_pix
 
 
 def test_pix_recovery_prints_nao_referenciam_dados_sensiveis():
@@ -706,6 +710,7 @@ def test_pix_recovery_prints_nao_referenciam_dados_sensiveis():
 
     for chamada in prints:
         for sensivel in (
+            "email",
             "telefone",
             "cpf",
             "pix_code",
@@ -716,6 +721,8 @@ def test_pix_recovery_prints_nao_referenciam_dados_sensiveis():
             "client_secret",
             "access_token",
             "account_id",
+            "worker_token",
+            "payload_recebido",
         ):
             assert sensivel not in chamada
 
@@ -950,77 +957,6 @@ def test_credenciais_kiwify_ausentes_falham_sem_chamada_externa(monkeypatch):
     assert chamadas == []
 
 
-def test_logs_kiwify_verify_sucesso_sao_sanitizados(monkeypatch, capsys):
-    segredos = {
-        "client_id": "client-id-ultrassecreto",
-        "client_secret": "client-secret-ultrassecreto",
-        "access_token": "oauth-token-ultrassecreto",
-        "account_id": "account-id-ultrassecreto",
-        "order_id": "order-id-ultrassecreto",
-        "email": "email-ultrassecreto@example.com",
-    }
-    monkeypatch.setenv("KIWIFY_API_CLIENT_ID", segredos["client_id"])
-    monkeypatch.setenv("KIWIFY_API_CLIENT_SECRET", segredos["client_secret"])
-    monkeypatch.setenv("KIWIFY_ACCOUNT_ID", segredos["account_id"])
-    pix_recovery._kiwify_oauth_cache.update(access_token="", expires_at=0.0)
-    monkeypatch.setattr(
-        pix_recovery.requests,
-        "post",
-        lambda *args, **kwargs: FakeResponse(
-            200,
-            {"access_token": segredos["access_token"], "expires_in": 3600},
-        ),
-    )
-    monkeypatch.setattr(
-        pix_recovery.requests,
-        "get",
-        lambda *args, **kwargs: FakeResponse(
-            200,
-            {
-                "id": segredos["order_id"],
-                "status": "waiting_payment",
-                "payment_method": "pix",
-                "customer": {"email": segredos["email"]},
-            },
-        ),
-    )
-
-    assert confirmar_real(
-        segredos["order_id"], pix_recovery.KIWIFY_PENDING_STATUSES, "pix"
-    )["status"] == "waiting_payment"
-    logs = capsys.readouterr().out
-
-    assert "[KIWIFY VERIFY] credentials_present=True" in logs
-    assert "[KIWIFY VERIFY] oauth_request" in logs
-    assert "[KIWIFY VERIFY] oauth_status=200" in logs
-    assert "oauth_token_present=True expires_valid=True" in logs
-    assert "[KIWIFY VERIFY] account_present=True" in logs
-    assert "[KIWIFY VERIFY] sale_request" in logs
-    assert "[KIWIFY VERIFY] sale_status=200" in logs
-    assert (
-        "identity_ok=True status=waiting_payment payment_method=pix "
-        "email_present=True"
-    ) in logs
-    assert "[KIWIFY VERIFY] accepted=True" in logs
-    for valor in segredos.values():
-        assert valor not in logs
-
-
-def test_logs_kiwify_verify_explicam_fail_closed_sem_corpo(monkeypatch, capsys):
-    instalar_consulta_kiwify(
-        monkeypatch,
-        FakeResponse(403, {"sensitive": "corpo-nao-pode-aparecer"}),
-    )
-
-    assert confirmar_real("order-nao-logada", {"paid"}) == {}
-    logs = capsys.readouterr().out
-
-    assert "[KIWIFY VERIFY] sale_status=403" in logs
-    assert "[KIWIFY VERIFY] rejected reason=sale_http_403" in logs
-    assert "order-nao-logada" not in logs
-    assert "corpo-nao-pode-aparecer" not in logs
-
-
 def test_webhook_persiste_job_antes_do_handler_e_sobrevive_sem_worker(monkeypatch):
     eventos = []
     request = FakeRequest(payload=payload_pix_plano())
@@ -1249,3 +1185,60 @@ def test_endpoint_reconciliacao_exige_bearer_configurado(monkeypatch):
 
     request.headers = {"Authorization": "Bearer worker-secret"}
     pix_recovery._autorizar_reconciliacao(request)
+
+
+def test_endpoint_reconciliacao_usa_compare_digest():
+    codigo = (
+        Path(__file__).parents[1] / "pix_recovery.py"
+    ).read_text(encoding="utf-8")
+
+    assert "hmac.compare_digest(recebido, segredo)" in codigo
+
+
+def test_migration_008_converge_permissoes_minimas():
+    sql = (
+        Path(__file__).parents[1] / "sql" / "008_harden_recovery_pix_permissions.sql"
+    ).read_text(encoding="utf-8").lower()
+
+    assert "recovery_pix_orders enable row level security" in sql
+    assert "recovery_pix_jobs enable row level security" in sql
+    assert "revoke all on table public.recovery_pix_orders from public, anon, authenticated" in sql
+    assert "revoke all on table public.recovery_pix_jobs from public, anon, authenticated" in sql
+    assert "revoke all on table public.recovery_pix_orders from service_role" in sql
+    assert "revoke all on table public.recovery_pix_jobs from service_role" in sql
+    assert "grant select on table public.recovery_pix_orders to service_role" in sql
+    assert "grant select on table public.recovery_pix_jobs to service_role" in sql
+    assert "grant insert" not in sql
+    assert "grant update" not in sql
+    assert sql.count("from public, anon, authenticated") == 11
+    assert sql.count("to service_role") == 11
+
+
+def test_migrations_005_006_007_008_formam_caminho_limpo_e_upgrade():
+    raiz = Path(__file__).parents[1] / "sql"
+    m005 = (raiz / "005_create_recovery_pix_orders.sql").read_text(encoding="utf-8").lower()
+    m006 = (raiz / "006_upgrade_recovery_pix_orders.sql").read_text(encoding="utf-8").lower()
+    m007 = (raiz / "007_create_recovery_pix_jobs.sql").read_text(encoding="utf-8").lower()
+    m008 = (raiz / "008_harden_recovery_pix_permissions.sql").read_text(encoding="utf-8").lower()
+
+    assert "create table if not exists public.recovery_pix_orders" in m005
+    assert "to_regclass('public.recovery_pix_orders') is not null" in m006
+    assert "create table if not exists public.recovery_pix_jobs" in m007
+    assert "primary key (order_id, event_type)" in m007
+    assert "recovery_pix_orders enable row level security" in m008
+    assert "recovery_pix_jobs enable row level security" in m008
+
+
+def test_logs_operacionais_nao_imprimem_exception_message(monkeypatch, capsys):
+    segredo = "email-token-order-id-ultrassecreto"
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "get",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(segredo)),
+    )
+
+    assert pix_recovery.listar_jobs_pix_recuperaveis() == []
+    logs = capsys.readouterr().out
+
+    assert "[PIX Job] Falha ao consultar jobs: RuntimeError" in logs
+    assert segredo not in logs

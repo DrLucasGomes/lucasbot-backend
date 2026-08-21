@@ -1,6 +1,6 @@
 # ADR-005: Recuperação de PIX por order_id, fencing token e cancelamento reconciliável
 
-- Status: proposto / em validação na branch `feat/pix-recovery`
+- Status: aceito após E2E real
 - Data: 2026-08-20
 
 ## Contexto
@@ -61,7 +61,21 @@ O ledger PIX não persiste CPF, IP, `pix_code`, QR Code ou payload completo. O m
 
 ## Migrations
 
-`005_create_recovery_pix_orders.sql` representa a instalação limpa. `006_upgrade_recovery_pix_orders.sql` é upgrade defensivo e semanticamente idempotente. O backfill conservador de `subscribe_attempted` roda somente quando a coluna está sendo introduzida; reaplicar a 006 em um schema já atualizado não reclassifica ordens novas. Na primeira execução sobre schema legado, a migration adiciona `attempt_token` e `subscribe_attempted`, marca conservadoramente estados antigos quando necessário, converte `cancelled` antigo suspeito para pending, ajusta schema/RPCs e reaplica permissões.
+`005_create_recovery_pix_orders.sql` representa a instalação limpa do ledger. `006_upgrade_recovery_pix_orders.sql` é upgrade defensivo e semanticamente idempotente. `007_create_recovery_pix_jobs.sql` cria a inbox durável e suas RPCs CAS. `008_harden_recovery_pix_permissions.sql` converge instalações novas e já aplicadas para RLS habilitado, leitura direta somente por `service_role` e mutações somente pelas RPCs.
+
+## Validação E2E real
+
+Em 21/08/2026, o fluxo completo foi validado com Kiwify, Render, Supabase e Kit reais:
+
+- `pix_created` persistiu um job em `recovery_pix_jobs` antes do ACK;
+- a primeira tentativa falhou e permaneceu `retryable`;
+- a reconciliação posterior recuperou o job, que terminou `completed` após três tentativas;
+- a tag `pix-gerado-vigor360` foi aplicada;
+- a mesma ordem recebeu pagamento, removeu a tag PIX e preservou `comprador-vigor-360`;
+- o ledger permaneceu conservador conforme `subscribe_attempted`;
+- uma reconciliação posterior retornou zero candidatos.
+
+O teste demonstrou concretamente que ACK do webhook não implica conclusão e que a inbox durável recupera o evento após falha/restart.
 
 ## Consequências
 

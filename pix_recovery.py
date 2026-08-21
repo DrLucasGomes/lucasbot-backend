@@ -26,24 +26,6 @@ PIX_JOB_RECONCILE_LIMIT = 5
 _kiwify_oauth_lock = threading.Lock()
 _kiwify_oauth_cache = {"access_token": "", "expires_at": 0.0}
 
-_KIWIFY_STATUS_LOG_VALUES = frozenset(
-    {
-        "approved",
-        "authorized",
-        "chargedback",
-        "paid",
-        "pending",
-        "pending_refund",
-        "processing",
-        "refunded",
-        "refund_requested",
-        "refused",
-        "waiting_payment",
-    }
-)
-_KIWIFY_PAYMENT_LOG_VALUES = frozenset({"boleto", "credit_card", "pix"})
-
-
 def _ordem(dados):
     if not isinstance(dados, dict):
         return {}
@@ -66,40 +48,24 @@ def _texto(valor):
     return str(valor or "").strip()
 
 
-def _kiwify_verify_log(mensagem: str) -> None:
-    print(f"[KIWIFY VERIFY] {mensagem}")
-
-
-def _valor_kiwify_seguro_para_log(valor: str, permitidos) -> str:
-    return valor if valor in permitidos else "unexpected"
-
-
 def _obter_oauth_token_kiwify() -> str:
     """Obtém e reutiliza o OAuth da Kiwify sem expor credenciais."""
     client_id = _texto(os.getenv("KIWIFY_API_CLIENT_ID"))
     client_secret = _texto(os.getenv("KIWIFY_API_CLIENT_SECRET"))
-    credenciais_presentes = bool(client_id and client_secret)
-    _kiwify_verify_log(f"credentials_present={credenciais_presentes}")
-
     agora = time.monotonic()
     token_cache = _texto(_kiwify_oauth_cache.get("access_token"))
     if token_cache and agora < float(_kiwify_oauth_cache.get("expires_at") or 0):
-        _kiwify_verify_log("cache_used=True")
         return token_cache
 
-    _kiwify_verify_log("cache_used=False")
     if not client_id or not client_secret:
-        _kiwify_verify_log("rejected reason=credentials_missing")
         return ""
 
     with _kiwify_oauth_lock:
         agora = time.monotonic()
         token_cache = _texto(_kiwify_oauth_cache.get("access_token"))
         if token_cache and agora < float(_kiwify_oauth_cache.get("expires_at") or 0):
-            _kiwify_verify_log("cache_used=True")
             return token_cache
 
-        _kiwify_verify_log("oauth_request")
         try:
             resposta = requests.post(
                 f"{KIWIFY_API_BASE_URL}/oauth/token",
@@ -108,46 +74,27 @@ def _obter_oauth_token_kiwify() -> str:
                 timeout=KIWIFY_API_TIMEOUT_SECONDS,
             )
         except Exception:
-            _kiwify_verify_log("rejected reason=oauth_request_error")
             return ""
 
-        _kiwify_verify_log(f"oauth_status={resposta.status_code}")
         if resposta.status_code != 200:
-            _kiwify_verify_log(f"rejected reason=oauth_http_{resposta.status_code}")
             return ""
 
         try:
             corpo = resposta.json()
         except Exception:
-            _kiwify_verify_log("oauth_json_valid=False")
-            _kiwify_verify_log("rejected reason=oauth_json_invalid")
             return ""
         if not isinstance(corpo, dict):
-            _kiwify_verify_log("oauth_json_valid=False")
-            _kiwify_verify_log("rejected reason=oauth_json_invalid")
             return ""
 
-        _kiwify_verify_log("oauth_json_valid=True")
-
         access_token = _texto(corpo.get("access_token"))
-        token_presente = bool(access_token)
         try:
             expires_in = max(int(corpo.get("expires_in") or 0), 0)
         except (TypeError, ValueError):
-            _kiwify_verify_log(
-                f"oauth_token_present={token_presente} expires_valid=False"
-            )
-            _kiwify_verify_log("rejected reason=oauth_expires_invalid")
             return ""
         expires_valido = expires_in > 0
-        _kiwify_verify_log(
-            f"oauth_token_present={token_presente} expires_valid={expires_valido}"
-        )
         if not access_token:
-            _kiwify_verify_log("rejected reason=oauth_token_missing")
             return ""
         if not expires_valido:
-            _kiwify_verify_log("rejected reason=oauth_expires_invalid")
             return ""
 
         # Renova com margem para nunca usar token no limite da expiração.
@@ -165,20 +112,15 @@ def confirmar_venda_kiwify(
     """Retorna somente dados mínimos de uma venda confirmada; falhas fecham o fluxo."""
     order_id = _texto(order_id)
     account_id = _texto(os.getenv("KIWIFY_ACCOUNT_ID"))
-    _kiwify_verify_log(f"account_present={bool(account_id)}")
     if not order_id:
-        _kiwify_verify_log("rejected reason=order_id_missing")
         return {}
     if not account_id:
-        _kiwify_verify_log("rejected reason=account_missing")
         return {}
 
     access_token = _obter_oauth_token_kiwify()
     if not access_token:
-        _kiwify_verify_log("rejected reason=oauth_unavailable")
         return {}
 
-    _kiwify_verify_log("sale_request")
     try:
         resposta = requests.get(
             f"{KIWIFY_API_BASE_URL}/sales/{quote(order_id, safe='')}",
@@ -189,26 +131,17 @@ def confirmar_venda_kiwify(
             timeout=KIWIFY_API_TIMEOUT_SECONDS,
         )
     except Exception:
-        _kiwify_verify_log("rejected reason=sale_request_error")
         return {}
 
-    _kiwify_verify_log(f"sale_status={resposta.status_code}")
     if resposta.status_code != 200:
-        _kiwify_verify_log(f"rejected reason=sale_http_{resposta.status_code}")
         return {}
 
     try:
         venda = resposta.json()
     except Exception:
-        _kiwify_verify_log("sale_json_valid=False")
-        _kiwify_verify_log("rejected reason=sale_json_invalid")
         return {}
     if not isinstance(venda, dict):
-        _kiwify_verify_log("sale_json_valid=False")
-        _kiwify_verify_log("rejected reason=sale_json_invalid")
         return {}
-
-    _kiwify_verify_log("sale_json_valid=True")
 
     identity_ok = _texto(venda.get("id")) == order_id
     status = _texto(venda.get("status")).lower()
@@ -217,28 +150,15 @@ def confirmar_venda_kiwify(
     if not isinstance(customer, dict):
         customer = {}
     email = _texto(customer.get("email"))
-    status_log = _valor_kiwify_seguro_para_log(status, _KIWIFY_STATUS_LOG_VALUES)
-    payment_log = _valor_kiwify_seguro_para_log(
-        payment_method, _KIWIFY_PAYMENT_LOG_VALUES
-    )
-    _kiwify_verify_log(
-        f"identity_ok={identity_ok} status={status_log} "
-        f"payment_method={payment_log} email_present={bool(email)}"
-    )
     if not identity_ok:
-        _kiwify_verify_log("rejected reason=sale_identity_mismatch")
         return {}
 
     statuses_normalizados = {_texto(item).lower() for item in statuses_aceitos}
     if status not in statuses_normalizados:
-        _kiwify_verify_log("rejected reason=sale_status_incompatible")
         return {}
 
     if payment_method_esperado and payment_method != _texto(payment_method_esperado).lower():
-        _kiwify_verify_log("rejected reason=sale_payment_method_incompatible")
         return {}
-
-    _kiwify_verify_log("accepted=True")
 
     return {
         "id": order_id,
@@ -350,15 +270,19 @@ def listar_jobs_pix_recuperaveis(limit: int = PIX_JOB_RECONCILE_LIMIT) -> list[d
             headers=obter_headers_supabase(),
             timeout=3,
         )
-    except Exception:
+    except Exception as exc:
+        print(f"[PIX Job] Falha ao consultar jobs: {type(exc).__name__}")
         return []
     if resposta.status_code != 200:
+        print(f"[PIX Job] Consulta de jobs falhou: HTTP {resposta.status_code}")
         return []
     try:
         jobs = resposta.json()
-    except Exception:
+    except Exception as exc:
+        print(f"[PIX Job] Resposta invalida na reconciliacao: {type(exc).__name__}")
         return []
     if not isinstance(jobs, list):
+        print("[PIX Job] Resposta invalida na reconciliacao: formato inesperado")
         return []
     return [
         {"order_id": _texto(job.get("order_id")), "event_type": _texto(job.get("event_type"))}
@@ -627,9 +551,18 @@ def processar_job_pix(order_id: str, event_type: str) -> bool:
         sucesso = False
 
     if sucesso:
-        return concluir_job_pix(order_id, event_type, attempt_token)
+        concluido = concluir_job_pix(order_id, event_type, attempt_token)
+        if not concluido:
+            print("[PIX Job] Conclusao nao confirmada; aguardando stale recovery")
+        return concluido
 
-    falhar_job_pix(order_id, event_type, attempt_token, retryable=True)
+    retry_persistido = falhar_job_pix(
+        order_id, event_type, attempt_token, retryable=True
+    )
+    if retry_persistido:
+        print("[PIX Job] Processamento falhou; job marcado como retryable")
+    else:
+        print("[PIX Job] Falha ao persistir retry; aguardando stale recovery")
     return False
 
 
@@ -676,8 +609,6 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
     except Exception:
         pass
 
-    print(f"[PIX FLOW] classified_pix={eh_pix} classified_paid={eh_pago}")
-
     event_type = "pix_created" if eh_pix else "paid" if eh_pago else ""
     order_id = _dados_pix(dados).get("order_id") if event_type else ""
     job_persistido = True
@@ -687,6 +618,7 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
     resposta = await webhook_kiwify(request, background_tasks)
 
     if not job_persistido:
+        print("[PIX Job] Falha ao persistir evento antes do ACK")
         raise HTTPException(status_code=503, detail="evento nao persistido")
 
     if dados is None:
@@ -695,10 +627,8 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
     try:
         if eh_pix:
             background_tasks.add_task(processar_job_pix, order_id, event_type)
-            print("[PIX FLOW] pix_task_scheduled=True")
         elif eh_pago:
             background_tasks.add_task(processar_job_pix, order_id, event_type)
-            print("[PIX FLOW] paid_task_scheduled=True")
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao agendar efeito adicional: {type(exc).__name__}")
 

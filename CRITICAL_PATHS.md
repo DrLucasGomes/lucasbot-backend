@@ -104,6 +104,6 @@ Invariantes que não podem ser quebradas:
 - não persistir/logar CPF, IP, `pix_code`, QR Code ou payload de pagamento;
 - PIX usa `TAG_PIX_ID` próprio, nunca `TAG_ABANDONO_ID`;
 - RPCs `SECURITY DEFINER` são restritas a `service_role`;
-- instalação limpa do ledger usa `005_create_recovery_pix_orders.sql`; upgrade defensivo usa `006_upgrade_recovery_pix_orders.sql`; a inbox durável usa `007_create_recovery_pix_jobs.sql`.
+- instalação limpa do ledger usa `005_create_recovery_pix_orders.sql`; upgrade defensivo usa `006_upgrade_recovery_pix_orders.sql`; a inbox durável usa `007_create_recovery_pix_jobs.sql`; permissões finais convergem por `008_harden_recovery_pix_permissions.sql`.
 
 Antes do merge, testar explicitamente o cenário adversarial: tentativa OLD chega a `subscribing`, fica stale, tentativa NEW substitui token, `paid` executa unsubscribe e depois o subscribe remoto OLD é efetivado. O estado local **não pode estar `cancelled`** nesse cenário; deve permanecer `cancelled_pending_unsubscribe` porque `subscribe_attempted=true`. Também são obrigatórios testes de concorrência real/RPCs no Supabase, permissões, JSON inválido, regressão de `cart_abandoned`/`paid`, tag do Kit e E2E Kiwify -> Render -> Supabase -> Kit.
