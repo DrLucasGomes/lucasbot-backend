@@ -9,15 +9,53 @@ preserva origem/campanha first-touch. POST /kiwify preserva o processamento
 existente e acrescenta apenas a recuperacao idempotente de PIX.
 """
 
+import requests
 from fastapi.middleware.cors import CORSMiddleware
 
-from main import app
+from main import app, obter_headers_supabase
 from journey_events import router as journey_events_router
 from tracking_routes import router as tracking_router
 from tracking_claim_routes import router as tracking_claim_router
 from tracking_safe_webhook import router as tracking_safe_webhook_router
 from recovery_routes import router as recovery_router
+import pix_recovery
 from pix_recovery import router as pix_recovery_router
+
+
+def _rpc_bool_debug(nome: str, payload: dict) -> bool:
+    """Instrumentacao temporaria e sanitizada para o E2E PIX.
+
+    Registra somente nome da RPC, HTTP status e corpo retornado pelo PostgREST.
+    Nao registra headers, chaves, email, order_id ou payload enviado.
+    """
+    try:
+        resposta = requests.post(
+            f"{pix_recovery.URL}/rest/v1/rpc/{nome}",
+            json=payload,
+            headers=obter_headers_supabase(),
+            timeout=3,
+        )
+    except Exception as exc:
+        print(f"[PIX RPC DEBUG] rpc={nome} exception={type(exc).__name__}: {str(exc)}")
+        return False
+
+    corpo = resposta.text[:500].replace("\n", " ")
+    print(
+        f"[PIX RPC DEBUG] rpc={nome} status={resposta.status_code} response={corpo}"
+    )
+
+    if resposta.status_code != 200:
+        return False
+
+    try:
+        return resposta.json() is True
+    except Exception:
+        return False
+
+
+# Instrumentacao temporaria apenas nesta branch de teste. Remover antes do merge.
+pix_recovery._rpc_bool = _rpc_bool_debug
+
 
 app.add_middleware(
     CORSMiddleware,
