@@ -9,6 +9,7 @@ preserva origem/campanha first-touch. POST /kiwify preserva o processamento
 existente e acrescenta apenas a recuperacao idempotente de PIX.
 """
 
+import os
 import requests
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -53,8 +54,41 @@ def _rpc_bool_debug(nome: str, payload: dict) -> bool:
         return False
 
 
+def _alterar_tag_kit_debug(email: str, acao: str) -> bool:
+    """E2E temporario: subscribe usa api_key; unsubscribe usa api_secret."""
+    tag_id = os.getenv("TAG_PIX_ID")
+    if not tag_id or not email:
+        print(f"[PIX KIT DEBUG] action={acao} config_ok=False")
+        return False
+
+    if acao == "unsubscribe":
+        credencial = os.getenv("CONVERTKIT_API_SECRET")
+        campo_credencial = "api_secret"
+    else:
+        credencial = os.getenv("CONVERTKIT_API_KEY")
+        campo_credencial = "api_key"
+
+    if not credencial:
+        print(f"[PIX KIT DEBUG] action={acao} config_ok=False")
+        return False
+
+    try:
+        resposta = requests.post(
+            f"{pix_recovery.KIT_BASE_URL}/tags/{tag_id}/{acao}",
+            json={campo_credencial: credencial, "email": email},
+            timeout=5,
+        )
+    except Exception as exc:
+        print(f"[PIX KIT DEBUG] action={acao} exception={type(exc).__name__}")
+        return False
+
+    print(f"[PIX KIT DEBUG] action={acao} status={resposta.status_code}")
+    return resposta.status_code in (200, 201, 204)
+
+
 # Instrumentacao temporaria apenas nesta branch de teste. Remover antes do merge.
 pix_recovery._rpc_bool = _rpc_bool_debug
+pix_recovery._alterar_tag_kit = _alterar_tag_kit_debug
 
 
 app.add_middleware(
