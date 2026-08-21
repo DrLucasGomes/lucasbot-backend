@@ -13,10 +13,12 @@ Antes de alterar um ponto crítico:
 1. Crie uma branch dedicada.
 2. Rode `pytest` e confirme a linha de base.
 3. Faça a mudança com o menor escopo possível.
-4. Rode novamente toda a suíte.
-5. Revise o diff, incluindo migrations e contratos HTTP.
-6. Abra um PR com riscos e evidências de teste.
-7. Aguarde a CI verde antes do merge.
+4. Peça uma auditoria adversarial no VS Code/Codex antes do merge, com perguntas explícitas sobre regressão, concorrência, ordenação, idempotência, retry e exposição de dados.
+5. Corrija os riscos encontrados e rode novamente toda a suíte.
+6. Revise o diff, incluindo migrations e contratos HTTP.
+7. Atualize `ARCHITECTURE.md`, `CRITICAL_PATHS.md` e ADRs quando houver decisão estrutural.
+8. Abra um PR com riscos e evidências de teste.
+9. Aguarde a CI verde antes do merge.
 
 Para mudanças em jornada, confirme especialmente a preservação de `manychat_id`, `journey_run_id` e `dedupe_key`, o comportamento best-effort e a ausência de updates ou deletes em `journey_events`.
 
@@ -57,3 +59,51 @@ Antes de considerar mudanças futuras prontas, validar:
 8. após o E-mail 1, um `paid` remove o contato da recuperação e impede E-mails 2 e 3.
 
 Os itens 1 a 7 foram validados para a implementação atual, incluindo atribuição sintética do E-mail 1. O item 8 está em validação final com a cadência real da sequência.
+
+## Recuperação PIX
+
+PIX gerado, abandono de checkout e play da VSL são gatilhos diferentes e devem permanecer isolados.
+
+Contrato operacional confirmado da Kiwify para entrada PIX:
+
+- `webhook_event_type = pix_created`;
+- `order_status = waiting_payment`;
+- `payment_method = pix`;
+- `order_id` obrigatório.
+
+Invariantes que não podem ser quebradas:
+
+- `/kiwify` original deve ser executado exatamente uma vez; a camada adicional PIX roda isoladamente em background;
+- antes de qualquer efeito PIX, confirmar a venda em `GET /v1/sales/{order_id}` com OAuth oficial da Kiwify;
+- `pix_created` exige identidade exata, método PIX e status oficial `pending`/`waiting_payment`; `paid` exige identidade exata e status oficial `paid`;
+- qualquer falha de credencial, HTTP, timeout, JSON ou divergência deve falhar fechada sem RPC/transição/tag PIX;
+- credenciais Kiwify são `KIWIFY_API_CLIENT_ID`, `KIWIFY_API_CLIENT_SECRET` e `KIWIFY_ACCOUNT_ID`; nunca entram em URL, logs ou payload persistido;
+- ACK do webhook não significa efeito concluído: `pix_created`/`paid` devem estar na inbox `recovery_pix_jobs` antes do HTTP 200;
+- falha ao persistir inbox deve produzir resposta não-2xx; nunca confirmar recebimento sem cópia durável;
+- `(order_id, event_type)` impede duplicação lógica e o job contém somente identidade mínima, estado, tentativas, fencing e timestamps;
+- `BackgroundTasks` é somente otimização pós-enqueue, nunca garantia de entrega;
+- aquisição/conclusão/falha do job exigem CAS e `attempt_token`; `processing` stale deve ser recuperável;
+- `POST /internal/recovery-pix/reconcile` exige `PIX_RECOVERY_WORKER_TOKEN` e chamada periódica externa ao webhook;
+- falhas externas mantêm o job `retryable`; crash depois do ACK é retomado pela reconciliação;
+- JSON inválido deve preservar o comportamento da rota original;
+- `order_id` é a identidade operacional da recuperação PIX;
+- cada tentativa usa `attempt_token` único como fencing token para CAS local;
+- `subscribe_attempted` é monotônico: uma vez `true`, nunca volta para `false`, inclusive após retry stale com token novo;
+- `processing -> subscribing` deve marcar `subscribe_attempted=true` atomicamente;
+- pagamento persiste `cancelled_pending_unsubscribe` antes de chamar o Kit;
+- se `subscribe_attempted=false`, unsubscribe confirmado pode permitir `cancelled`;
+- se `subscribe_attempted=true`, **não confirmar `cancelled` automaticamente**, mesmo após unsubscribe bem-sucedido; manter pending detectável para que efeito remoto tardio de qualquer tentativa antiga nunca fique escondido;
+- `cancelled_pending_unsubscribe`, `cancelled` e `completed` não podem ser readquiridos para subscribe;
+- stale retry troca `attempt_token`, mas nunca apaga o histórico monotônico de que houve subscribe tentado;
+- worker antigo não pode concluir/falhar tentativa nova; se seu token já perdeu autoridade, a segurança contra efeito remoto tardio vem de `subscribe_attempted`, não de reabrir o token atual;
+- `recovery_pix_reopen_cancel` exige token correspondente e `subscribe_attempted=true`;
+- as únicas transições normais são `processing -> subscribing`, `subscribing -> completed` e `subscribing -> failed`;
+- falha/timeout de unsubscribe mantém pending;
+- nova entrega de `paid` ou `pix_created` pode repetir reconciliação pending sem reativar recovery;
+- falha da camada PIX não pode impedir compra/abandono no `/kiwify`;
+- não persistir/logar CPF, IP, `pix_code`, QR Code ou payload de pagamento;
+- PIX usa `TAG_PIX_ID` próprio, nunca `TAG_ABANDONO_ID`;
+- RPCs `SECURITY DEFINER` são restritas a `service_role`;
+- instalação limpa do ledger usa `005_create_recovery_pix_orders.sql`; upgrade defensivo usa `006_upgrade_recovery_pix_orders.sql`; a inbox durável usa `007_create_recovery_pix_jobs.sql`; permissões finais convergem por `008_harden_recovery_pix_permissions.sql`.
+
+Antes do merge, testar explicitamente o cenário adversarial: tentativa OLD chega a `subscribing`, fica stale, tentativa NEW substitui token, `paid` executa unsubscribe e depois o subscribe remoto OLD é efetivado. O estado local **não pode estar `cancelled`** nesse cenário; deve permanecer `cancelled_pending_unsubscribe` porque `subscribe_attempted=true`. Também são obrigatórios testes de concorrência real/RPCs no Supabase, permissões, JSON inválido, regressão de `cart_abandoned`/`paid`, tag do Kit e E2E Kiwify -> Render -> Supabase -> Kit.
