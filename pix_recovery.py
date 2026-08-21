@@ -510,6 +510,8 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
     except Exception:
         pass
 
+    print(f"[PIX FLOW] classified_pix={eh_pix} classified_paid={eh_pago}")
+
     resposta = await webhook_kiwify(request, background_tasks)
 
     if dados is None:
@@ -518,8 +520,10 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
     try:
         if eh_pix:
             background_tasks.add_task(processar_pix_criado, dados)
+            print("[PIX FLOW] pix_task_scheduled=True")
         elif eh_pago:
             background_tasks.add_task(cancelar_pix_por_pagamento, dados)
+            print("[PIX FLOW] paid_task_scheduled=True")
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao agendar efeito adicional: {type(exc).__name__}")
 
