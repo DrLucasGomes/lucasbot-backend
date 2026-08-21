@@ -45,6 +45,7 @@ class FakeRequest:
         self.error = error
         self.json_calls = 0
         self.query_params = {}
+        self.headers = {}
 
     async def json(self):
         self.json_calls += 1
@@ -66,6 +67,7 @@ def confirmar_venda_kiwify_por_padrao(monkeypatch):
         }
 
     monkeypatch.setattr(pix_recovery, "confirmar_venda_kiwify", confirmar)
+    monkeypatch.setattr(pix_recovery, "enfileirar_job_pix", lambda *args: True)
 
 
 def test_reconhece_contrato_real_pix_created():
@@ -440,7 +442,7 @@ def test_wrapper_json_invalido_preserva_handler_original(monkeypatch):
             payload_pix_plano(
                 order_status="paid", webhook_event_type="order_approved"
             ),
-            pix_recovery.cancelar_pix_por_pagamento,
+            pix_recovery.processar_job_pix,
         ),
     ],
 )
@@ -462,7 +464,7 @@ def test_wrapper_chama_handler_original_uma_vez_e_agenda_pix(
     assert resposta == {"status": "processado"}
     assert chamadas == [(request, tarefas)]
     assert len(tarefas.tasks) == 1
-    assert tarefas.tasks[0].func is tarefa_esperada
+    assert tarefas.tasks[0].func is pix_recovery.processar_job_pix
 
 
 def test_wrapper_cart_abandoned_preserva_handler_sem_efeito_pix(monkeypatch):
@@ -1017,3 +1019,233 @@ def test_logs_kiwify_verify_explicam_fail_closed_sem_corpo(monkeypatch, capsys):
     assert "[KIWIFY VERIFY] rejected reason=sale_http_403" in logs
     assert "order-nao-logada" not in logs
     assert "corpo-nao-pode-aparecer" not in logs
+
+
+def test_webhook_persiste_job_antes_do_handler_e_sobrevive_sem_worker(monkeypatch):
+    eventos = []
+    request = FakeRequest(payload=payload_pix_plano())
+    tarefas = BackgroundTasks()
+
+    monkeypatch.setattr(
+        pix_recovery,
+        "enfileirar_job_pix",
+        lambda order_id, event_type: eventos.append(("persisted", event_type)) or True,
+    )
+
+    async def handler_original(req, background_tasks):
+        eventos.append(("handler", None))
+        return {"status": "processado"}
+
+    monkeypatch.setattr(pix_recovery, "webhook_kiwify", handler_original)
+
+    resposta = asyncio.run(pix_recovery.webhook_kiwify_com_pix(request, tarefas))
+
+    assert resposta == {"status": "processado"}
+    assert eventos == [("persisted", "pix_created"), ("handler", None)]
+    assert len(tarefas.tasks) == 1
+    # Simula crash: a tarefa não é executada, mas o enqueue já foi confirmado.
+
+
+def test_reprocessamento_posterior_conclui_job(monkeypatch):
+    eventos = []
+    monkeypatch.setattr(pix_recovery, "uuid4", lambda: "job-token")
+    monkeypatch.setattr(
+        pix_recovery,
+        "adquirir_job_pix",
+        lambda order_id, event_type, token: eventos.append(("acquire", token)) or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "processar_pix_criado",
+        lambda payload: eventos.append(("effect", payload["webhook_event_type"])) or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "concluir_job_pix",
+        lambda order_id, event_type, token: eventos.append(("complete", token)) or True,
+    )
+
+    assert pix_recovery.processar_job_pix("order-1", "pix_created") is True
+    assert eventos == [
+        ("acquire", "job-token"),
+        ("effect", "pix_created"),
+        ("complete", "job-token"),
+    ]
+
+
+def test_webhook_duplicado_nao_cria_dois_jobs_logicos(monkeypatch):
+    jobs = set()
+    request = FakeRequest(payload=payload_pix_plano())
+
+    def enqueue(order_id, event_type):
+        jobs.add((order_id, event_type))
+        return True
+
+    async def handler_original(req, background_tasks):
+        return {"status": "processado"}
+
+    monkeypatch.setattr(pix_recovery, "enfileirar_job_pix", enqueue)
+    monkeypatch.setattr(pix_recovery, "webhook_kiwify", handler_original)
+
+    asyncio.run(pix_recovery.webhook_kiwify_com_pix(request, BackgroundTasks()))
+    asyncio.run(pix_recovery.webhook_kiwify_com_pix(request, BackgroundTasks()))
+
+    assert jobs == {
+        ("46bc33eb-6e53-4b4d-a8f7-72757a84b4ef", "pix_created")
+    }
+
+
+def test_dois_workers_tem_um_unico_vencedor(monkeypatch):
+    aquisicoes = iter([True, False])
+    efeitos = []
+    monkeypatch.setattr(
+        pix_recovery, "adquirir_job_pix", lambda *args: next(aquisicoes)
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "processar_pix_criado",
+        lambda payload: efeitos.append("effect") or True,
+    )
+    monkeypatch.setattr(pix_recovery, "concluir_job_pix", lambda *args: True)
+
+    assert pix_recovery.processar_job_pix("order-1", "pix_created") is True
+    assert pix_recovery.processar_job_pix("order-1", "pix_created") is False
+    assert efeitos == ["effect"]
+
+
+def test_job_stale_e_recuperavel_por_cas_na_migration_007():
+    sql = (
+        Path(__file__).parents[1] / "sql" / "007_create_recovery_pix_jobs.sql"
+    ).read_text(encoding="utf-8").lower()
+
+    assert "primary key (order_id, event_type)" in sql
+    assert "status in ('pending', 'retryable')" in sql
+    assert "status = 'processing'" in sql
+    assert "updated_at < now() - make_interval" in sql
+    assert "and attempt_token = p_attempt_token" in sql
+    assert "attempts = attempts + 1" in sql
+    assert "revoke all on table public.recovery_pix_jobs from public, anon, authenticated" in sql
+    assert "grant select, insert, update on table public.recovery_pix_jobs to service_role" in sql
+
+
+@pytest.mark.parametrize("falha", ["kiwify_5xx", "kiwify_timeout", "kit_timeout"])
+def test_falha_externa_mantem_job_retryable(monkeypatch, falha):
+    falhas = []
+    monkeypatch.setattr(pix_recovery, "adquirir_job_pix", lambda *args: True)
+    monkeypatch.setattr(
+        pix_recovery,
+        "falhar_job_pix",
+        lambda order_id, event_type, token, retryable=True: falhas.append(retryable)
+        or True,
+    )
+    if falha in {"kiwify_5xx", "kiwify_timeout"}:
+        monkeypatch.setattr(pix_recovery, "processar_pix_criado", lambda payload: False)
+    else:
+        monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: True)
+        monkeypatch.setattr(pix_recovery, "transicionar", lambda *args: True)
+        monkeypatch.setattr(
+            pix_recovery,
+            "_alterar_tag_kit",
+            lambda *args: (_ for _ in ()).throw(TimeoutError("timeout")),
+        )
+        monkeypatch.setattr(
+            pix_recovery, "compensar_subscribe_concorrente", lambda *args: False
+        )
+
+    assert pix_recovery.processar_job_pix("order-1", "pix_created") is False
+    assert falhas == [True]
+
+
+def test_paid_e_pix_jobs_preservam_ordering_conservador(monkeypatch):
+    eventos = []
+    monkeypatch.setattr(pix_recovery, "adquirir_job_pix", lambda *args: True)
+    monkeypatch.setattr(
+        pix_recovery,
+        "cancelar_pix_por_pagamento",
+        lambda payload: eventos.append("paid") or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "processar_pix_criado",
+        lambda payload: eventos.append("pix_after_paid_noop") or True,
+    )
+    monkeypatch.setattr(pix_recovery, "concluir_job_pix", lambda *args: True)
+
+    assert pix_recovery.processar_job_pix("order-1", "paid") is True
+    assert pix_recovery.processar_job_pix("order-1", "pix_created") is True
+    assert eventos == ["paid", "pix_after_paid_noop"]
+
+
+def test_cart_abandoned_nao_enfileira_job_pix(monkeypatch):
+    enfileirados = []
+    request = FakeRequest(
+        payload={"cart": {"status": "cart_abandoned", "email": "cart@example.com"}}
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "enfileirar_job_pix",
+        lambda *args: enfileirados.append(args) or True,
+    )
+
+    async def handler_original(req, background_tasks):
+        return {"status": "processado"}
+
+    monkeypatch.setattr(pix_recovery, "webhook_kiwify", handler_original)
+
+    asyncio.run(pix_recovery.webhook_kiwify_com_pix(request, BackgroundTasks()))
+
+    assert enfileirados == []
+
+
+def test_enqueue_falha_impede_ack_200_mas_handler_roda_uma_vez(monkeypatch):
+    chamadas = []
+    request = FakeRequest(payload=payload_pix_plano())
+    monkeypatch.setattr(pix_recovery, "enfileirar_job_pix", lambda *args: False)
+
+    async def handler_original(req, background_tasks):
+        chamadas.append(req)
+        return {"status": "processado"}
+
+    monkeypatch.setattr(pix_recovery, "webhook_kiwify", handler_original)
+
+    with pytest.raises(Exception) as erro:
+        asyncio.run(
+            pix_recovery.webhook_kiwify_com_pix(request, BackgroundTasks())
+        )
+
+    assert getattr(erro.value, "status_code", None) == 503
+    assert chamadas == [request]
+
+
+def test_reconciliador_independente_reprocessa_jobs_persistidos(monkeypatch):
+    processados = []
+    monkeypatch.setattr(
+        pix_recovery,
+        "listar_jobs_pix_recuperaveis",
+        lambda limit: [
+            {"order_id": "order-1", "event_type": "pix_created"},
+            {"order_id": "order-2", "event_type": "paid"},
+        ],
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "processar_job_pix",
+        lambda order_id, event_type: processados.append((order_id, event_type)) or True,
+    )
+
+    resultado = pix_recovery.reconciliar_jobs_pix(limit=10)
+
+    assert resultado == {"candidates": 2, "completed": 2, "attempted": 2}
+    assert processados == [("order-1", "pix_created"), ("order-2", "paid")]
+
+
+def test_endpoint_reconciliacao_exige_bearer_configurado(monkeypatch):
+    request = FakeRequest()
+    monkeypatch.setenv("PIX_RECOVERY_WORKER_TOKEN", "worker-secret")
+
+    with pytest.raises(Exception) as erro:
+        pix_recovery._autorizar_reconciliacao(request)
+    assert getattr(erro.value, "status_code", None) == 401
+
+    request.headers = {"Authorization": "Bearer worker-secret"}
+    pix_recovery._autorizar_reconciliacao(request)

@@ -1,3 +1,4 @@
+import hmac
 import os
 import threading
 import time
@@ -5,7 +6,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import requests
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
 
@@ -13,11 +14,14 @@ from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
 router = APIRouter(tags=["kiwify-pix-recovery"])
 
 PIX_TABLE = "recovery_pix_orders"
+PIX_JOB_TABLE = "recovery_pix_jobs"
 KIT_BASE_URL = "https://api.convertkit.com/v3"
 PROCESSING_STALE_MINUTES = 5
 KIWIFY_API_BASE_URL = "https://public-api.kiwify.com/v1"
 KIWIFY_PENDING_STATUSES = frozenset({"pending", "waiting_payment"})
 KIWIFY_API_TIMEOUT_SECONDS = 5
+PIX_JOB_STALE_MINUTES = 5
+PIX_JOB_RECONCILE_LIMIT = 5
 
 _kiwify_oauth_lock = threading.Lock()
 _kiwify_oauth_cache = {"access_token": "", "expires_at": 0.0}
@@ -286,6 +290,85 @@ def _rpc_bool(nome: str, payload: dict) -> bool:
         return False
 
 
+def enfileirar_job_pix(order_id: str, event_type: str) -> bool:
+    return _rpc_bool(
+        "recovery_pix_job_enqueue",
+        {"p_order_id": order_id, "p_event_type": event_type},
+    )
+
+
+def adquirir_job_pix(order_id: str, event_type: str, attempt_token: str) -> bool:
+    return _rpc_bool(
+        "recovery_pix_job_acquire",
+        {
+            "p_order_id": order_id,
+            "p_event_type": event_type,
+            "p_attempt_token": attempt_token,
+            "p_stale_minutes": PIX_JOB_STALE_MINUTES,
+        },
+    )
+
+
+def concluir_job_pix(order_id: str, event_type: str, attempt_token: str) -> bool:
+    return _rpc_bool(
+        "recovery_pix_job_complete",
+        {
+            "p_order_id": order_id,
+            "p_event_type": event_type,
+            "p_attempt_token": attempt_token,
+        },
+    )
+
+
+def falhar_job_pix(
+    order_id: str,
+    event_type: str,
+    attempt_token: str,
+    retryable: bool = True,
+) -> bool:
+    return _rpc_bool(
+        "recovery_pix_job_fail",
+        {
+            "p_order_id": order_id,
+            "p_event_type": event_type,
+            "p_attempt_token": attempt_token,
+            "p_retryable": retryable,
+        },
+    )
+
+
+def listar_jobs_pix_recuperaveis(limit: int = PIX_JOB_RECONCILE_LIMIT) -> list[dict]:
+    try:
+        resposta = requests.get(
+            f"{URL}/rest/v1/{PIX_JOB_TABLE}",
+            params={
+                "status": "in.(pending,retryable,processing)",
+                "select": "order_id,event_type",
+                "order": "updated_at.asc",
+                "limit": str(max(1, min(int(limit), 100))),
+            },
+            headers=obter_headers_supabase(),
+            timeout=3,
+        )
+    except Exception:
+        return []
+    if resposta.status_code != 200:
+        return []
+    try:
+        jobs = resposta.json()
+    except Exception:
+        return []
+    if not isinstance(jobs, list):
+        return []
+    return [
+        {"order_id": _texto(job.get("order_id")), "event_type": _texto(job.get("event_type"))}
+        for job in jobs
+        if isinstance(job, dict)
+        and _texto(job.get("order_id"))
+        and _texto(job.get("event_type")) in {"pix_created", "paid"}
+    ]
+
+
 def adquirir_processamento(order_id: str, email: str, attempt_token: str) -> bool:
     return _rpc_bool(
         "recovery_pix_acquire",
@@ -417,50 +500,60 @@ def compensar_subscribe_concorrente(order_id: str, email: str, attempt_token: st
 
 def processar_pix_criado(dados):
     if not _evento_pix_criado(dados):
-        return
+        return False
 
     info = _dados_pix(dados)
     order_id = info["order_id"]
     if not order_id:
-        return
+        return False
 
     venda = confirmar_venda_kiwify(
         order_id,
         statuses_aceitos=KIWIFY_PENDING_STATUSES,
         payment_method_esperado="pix",
     )
+    if not venda:
+        ledger = buscar_ledger(order_id)
+        if _texto(ledger.get("status")).lower() in {
+            "cancelled",
+            "cancelled_pending_unsubscribe",
+        }:
+            return True
+        return False
     email = _texto(venda.get("email"))
-    if not venda or not email:
-        return
+    if not email:
+        return False
 
     attempt_token = str(uuid4())
 
     try:
         if not adquirir_processamento(order_id, email, attempt_token):
-            reconciliar_cancelamento(order_id, email)
-            return
+            ledger = buscar_ledger(order_id)
+            if _texto(ledger.get("status")).lower() == "completed":
+                return True
+            return reconciliar_cancelamento(order_id, email)
 
         if not transicionar(order_id, attempt_token, "processing", "subscribing"):
-            reconciliar_cancelamento(order_id, email)
-            return
+            return reconciliar_cancelamento(order_id, email)
 
         try:
             sucesso = _alterar_tag_kit(email, "subscribe")
         except Exception as exc:
             print(f"[PIX Recovery] Resultado ambiguo do subscribe: {type(exc).__name__}")
             if compensar_subscribe_concorrente(order_id, email, attempt_token):
-                return
+                return True
             transicionar(order_id, attempt_token, "subscribing", "failed")
-            return
+            return False
 
         if not sucesso:
             if compensar_subscribe_concorrente(order_id, email, attempt_token):
-                return
+                return True
             transicionar(order_id, attempt_token, "subscribing", "failed")
-            return
+            return False
 
         if not transicionar(order_id, attempt_token, "subscribing", "completed"):
-            compensar_subscribe_concorrente(order_id, email, attempt_token)
+            return compensar_subscribe_concorrente(order_id, email, attempt_token)
+        return True
 
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao iniciar recovery: {type(exc).__name__}")
@@ -469,29 +562,102 @@ def processar_pix_criado(dados):
                 transicionar(order_id, attempt_token, "subscribing", "failed")
         except Exception:
             pass
+        return False
 
 
 def cancelar_pix_por_pagamento(dados):
     if not _evento_pago(dados):
-        return
+        return False
 
     info = _dados_pix(dados)
     order_id = info["order_id"]
     if not order_id:
-        return
+        return False
 
     venda = confirmar_venda_kiwify(order_id, statuses_aceitos={"paid"})
     if not venda:
-        return
+        return False
     email = _texto(venda.get("email"))
 
     try:
         if not persistir_cancelamento(order_id, email):
-            return
+            return False
 
-        reconciliar_cancelamento(order_id, email)
+        return reconciliar_cancelamento(order_id, email)
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao cancelar recovery: {type(exc).__name__}")
+        return False
+
+
+def _payload_minimo_job(order_id: str, event_type: str) -> dict:
+    if event_type == "pix_created":
+        return {
+            "order_id": order_id,
+            "webhook_event_type": "pix_created",
+            "payment_method": "pix",
+            "order_status": "waiting_payment",
+        }
+    if event_type == "paid":
+        return {
+            "order_id": order_id,
+            "webhook_event_type": "order_approved",
+            "order_status": "paid",
+        }
+    return {}
+
+
+def processar_job_pix(order_id: str, event_type: str) -> bool:
+    """Adquire um job durável e finaliza somente sob o mesmo fencing token."""
+    order_id = _texto(order_id)
+    event_type = _texto(event_type)
+    if not order_id or event_type not in {"pix_created", "paid"}:
+        return False
+
+    attempt_token = str(uuid4())
+    if not adquirir_job_pix(order_id, event_type, attempt_token):
+        return False
+
+    try:
+        payload = _payload_minimo_job(order_id, event_type)
+        if event_type == "pix_created":
+            sucesso = processar_pix_criado(payload)
+        else:
+            sucesso = cancelar_pix_por_pagamento(payload)
+    except Exception:
+        sucesso = False
+
+    if sucesso:
+        return concluir_job_pix(order_id, event_type, attempt_token)
+
+    falhar_job_pix(order_id, event_type, attempt_token, retryable=True)
+    return False
+
+
+def reconciliar_jobs_pix(limit: int = PIX_JOB_RECONCILE_LIMIT) -> dict:
+    jobs = listar_jobs_pix_recuperaveis(limit)
+    tentados = 0
+    concluidos = 0
+    for job in jobs:
+        tentados += 1
+        if processar_job_pix(job["order_id"], job["event_type"]):
+            concluidos += 1
+        # Um retorno False também cobre disputa perdida. Não expomos IDs.
+    return {"candidates": len(jobs), "completed": concluidos, "attempted": tentados}
+
+
+def _autorizar_reconciliacao(request: Request) -> None:
+    segredo = _texto(os.getenv("PIX_RECOVERY_WORKER_TOKEN"))
+    authorization = _texto(request.headers.get("Authorization"))
+    prefixo = "Bearer "
+    recebido = authorization[len(prefixo) :] if authorization.startswith(prefixo) else ""
+    if not segredo or not recebido or not hmac.compare_digest(recebido, segredo):
+        raise HTTPException(status_code=401, detail="nao autorizado")
+
+
+@router.post("/internal/recovery-pix/reconcile")
+async def reconciliar_jobs_pix_endpoint(request: Request):
+    _autorizar_reconciliacao(request)
+    return reconciliar_jobs_pix()
 
 
 @router.post("/kiwify")
@@ -512,17 +678,26 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
 
     print(f"[PIX FLOW] classified_pix={eh_pix} classified_paid={eh_pago}")
 
+    event_type = "pix_created" if eh_pix else "paid" if eh_pago else ""
+    order_id = _dados_pix(dados).get("order_id") if event_type else ""
+    job_persistido = True
+    if event_type:
+        job_persistido = enfileirar_job_pix(order_id, event_type)
+
     resposta = await webhook_kiwify(request, background_tasks)
+
+    if not job_persistido:
+        raise HTTPException(status_code=503, detail="evento nao persistido")
 
     if dados is None:
         return resposta
 
     try:
         if eh_pix:
-            background_tasks.add_task(processar_pix_criado, dados)
+            background_tasks.add_task(processar_job_pix, order_id, event_type)
             print("[PIX FLOW] pix_task_scheduled=True")
         elif eh_pago:
-            background_tasks.add_task(cancelar_pix_por_pagamento, dados)
+            background_tasks.add_task(processar_job_pix, order_id, event_type)
             print("[PIX FLOW] paid_task_scheduled=True")
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao agendar efeito adicional: {type(exc).__name__}")

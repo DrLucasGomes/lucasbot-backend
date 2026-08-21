@@ -78,6 +78,13 @@ Invariantes que não podem ser quebradas:
 - `pix_created` exige identidade exata, método PIX e status oficial `pending`/`waiting_payment`; `paid` exige identidade exata e status oficial `paid`;
 - qualquer falha de credencial, HTTP, timeout, JSON ou divergência deve falhar fechada sem RPC/transição/tag PIX;
 - credenciais Kiwify são `KIWIFY_API_CLIENT_ID`, `KIWIFY_API_CLIENT_SECRET` e `KIWIFY_ACCOUNT_ID`; nunca entram em URL, logs ou payload persistido;
+- ACK do webhook não significa efeito concluído: `pix_created`/`paid` devem estar na inbox `recovery_pix_jobs` antes do HTTP 200;
+- falha ao persistir inbox deve produzir resposta não-2xx; nunca confirmar recebimento sem cópia durável;
+- `(order_id, event_type)` impede duplicação lógica e o job contém somente identidade mínima, estado, tentativas, fencing e timestamps;
+- `BackgroundTasks` é somente otimização pós-enqueue, nunca garantia de entrega;
+- aquisição/conclusão/falha do job exigem CAS e `attempt_token`; `processing` stale deve ser recuperável;
+- `POST /internal/recovery-pix/reconcile` exige `PIX_RECOVERY_WORKER_TOKEN` e chamada periódica externa ao webhook;
+- falhas externas mantêm o job `retryable`; crash depois do ACK é retomado pela reconciliação;
 - JSON inválido deve preservar o comportamento da rota original;
 - `order_id` é a identidade operacional da recuperação PIX;
 - cada tentativa usa `attempt_token` único como fencing token para CAS local;
@@ -97,6 +104,6 @@ Invariantes que não podem ser quebradas:
 - não persistir/logar CPF, IP, `pix_code`, QR Code ou payload de pagamento;
 - PIX usa `TAG_PIX_ID` próprio, nunca `TAG_ABANDONO_ID`;
 - RPCs `SECURITY DEFINER` são restritas a `service_role`;
-- instalação limpa usa `005_create_recovery_pix_orders.sql`; upgrade defensivo usa também `006_upgrade_recovery_pix_orders.sql`.
+- instalação limpa do ledger usa `005_create_recovery_pix_orders.sql`; upgrade defensivo usa `006_upgrade_recovery_pix_orders.sql`; a inbox durável usa `007_create_recovery_pix_jobs.sql`.
 
 Antes do merge, testar explicitamente o cenário adversarial: tentativa OLD chega a `subscribing`, fica stale, tentativa NEW substitui token, `paid` executa unsubscribe e depois o subscribe remoto OLD é efetivado. O estado local **não pode estar `cancelled`** nesse cenário; deve permanecer `cancelled_pending_unsubscribe` porque `subscribe_attempted=true`. Também são obrigatórios testes de concorrência real/RPCs no Supabase, permissões, JSON inválido, regressão de `cart_abandoned`/`paid`, tag do Kit e E2E Kiwify -> Render -> Supabase -> Kit.

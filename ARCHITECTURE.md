@@ -67,6 +67,14 @@ Antes de qualquer RPC do ledger ou alteração de tag PIX, o worker confirma a v
 
 Para `pix_created`, a API deve devolver o mesmo `id`, `payment_method=pix` e status `pending` ou `waiting_payment`. Para pagamento, deve devolver o mesmo `id` e `status=paid`. O email usado no efeito Kit vem da resposta oficial. Credencial ausente, erro HTTP, rate limit, timeout, JSON inválido ou divergência de identidade/status/método falham fechados antes de subscribe, unsubscribe ou transição do ledger PIX.
 
+### Inbox durável do webhook PIX
+
+O HTTP 200 do webhook significa somente que o evento foi aceito e persistido; não significa que Kit e ledger já terminaram. Para `pix_created` e `paid`, o wrapper classifica o payload, grava sincronamente um job mínimo em `recovery_pix_jobs` e somente então executa o `/kiwify` legado exatamente uma vez e responde. Se o enqueue não for confirmado, a rota responde 503, permitindo reentrega pela Kiwify. A tabela guarda apenas `order_id`, tipo, estado, timestamps, tentativas e token de fencing; não guarda payload, email, CPF, IP, código PIX ou QR Code.
+
+`(order_id, event_type)` é a chave primária da inbox. Duplicatas convergem para o mesmo job. A aquisição `recovery_pix_job_acquire` é um CAS atômico: somente `pending`, `retryable` ou `processing` stale pode receber um novo `attempt_token`. Conclusão/falha exigem o token atual, portanto worker antigo não finaliza uma tentativa nova. Falha de Kiwify, Supabase ou Kit volta o job para `retryable`; processo morto em `processing` pode ser readquirido depois de cinco minutos.
+
+`BackgroundTasks` é apenas uma otimização de baixa latência depois da persistência. A garantia de entrega é a inbox no PostgreSQL. O endpoint autenticado `POST /internal/recovery-pix/reconcile`, com `Authorization: Bearer <PIX_RECOVERY_WORKER_TOKEN>`, deve ser chamado periodicamente por scheduler/cron independente do webhook. Ele busca jobs pendentes, retryable e processing, mas cada candidato ainda precisa vencer o CAS no PostgreSQL. Isso fornece retry e crash recovery mesmo após restart imediatamente posterior ao ACK.
+
 `recovery_pix_orders` usa `order_id` como chave primária. Cada tentativa recebe um `attempt_token` único para fencing local. Em paralelo, `subscribe_attempted` registra de forma monotônica se **qualquer** tentativa daquela ordem já chegou a `processing -> subscribing`. Esse marcador não é substituído por retry stale e não volta para `false`.
 
 Estados de trabalho são `processing`, `subscribing` e `failed`; `completed` é terminal para aquisição. Pagamentos usam `cancelled_pending_unsubscribe` e `cancelled`. A diferença agora é deliberadamente conservadora: `cancelled` automático só é permitido quando `subscribe_attempted=false`. Se qualquer tentativa já iniciou subscribe, o pagamento pode remover a tag naquele instante, mas o ledger permanece `cancelled_pending_unsubscribe` para manter detectável a possibilidade de um efeito remoto tardio.
