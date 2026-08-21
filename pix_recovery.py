@@ -1,8 +1,9 @@
+import hmac
 import os
 from uuid import uuid4
 
 import requests
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
 
@@ -268,8 +269,21 @@ def cancelar_pix_por_pagamento(dados):
         print(f"[PIX Recovery] Falha ao cancelar recovery: {type(exc).__name__}")
 
 
+def _validar_token_webhook(request: Request) -> None:
+    """Bloqueia chamadas que nao conhecem o segredo configurado no endpoint Kiwify."""
+    esperado = os.getenv("KIWIFY_WEBHOOK_TOKEN", "")
+    recebido = request.query_params.get("token", "")
+
+    # Fail closed: sem segredo configurado, o wrapper protegido nao processa eventos.
+    if not esperado or not recebido or not hmac.compare_digest(recebido, esperado):
+        raise HTTPException(status_code=401, detail="webhook nao autorizado")
+
+
 @router.post("/kiwify")
 async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundTasks):
+    # A autenticacao acontece antes do handler legado e antes de qualquer efeito PIX.
+    _validar_token_webhook(request)
+
     dados = None
     eh_pix = False
     eh_pago = False
