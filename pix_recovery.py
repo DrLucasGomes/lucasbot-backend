@@ -17,16 +17,18 @@ PROCESSING_STALE_MINUTES = 5
 def _ordem(dados):
     if not isinstance(dados, dict):
         return {}
+
     ordem = dados.get("order") or dados.get("Order")
     if isinstance(ordem, dict):
         return ordem
-    # A Kiwify envia/reenvia alguns webhooks com os campos da ordem no
-    # proprio nivel raiz, sem o envelope {"order": {...}}.
+
+    # A Kiwify pode entregar/reentregar os campos da ordem diretamente na raiz.
     if any(
         chave in dados
         for chave in ("order_id", "order_status", "payment_method", "webhook_event_type")
     ):
         return dados
+
     return {}
 
 
@@ -68,11 +70,6 @@ def _rpc_bool(nome: str, payload: dict) -> bool:
         headers=obter_headers_supabase(),
         timeout=3,
     )
-    try:
-        corpo = resposta.text[:500]
-    except Exception:
-        corpo = "<sem corpo>"
-    print(f"[PIX RPC DEBUG] rpc={nome} status={resposta.status_code} body={corpo}")
     if resposta.status_code != 200:
         return False
     try:
@@ -152,14 +149,25 @@ def buscar_ledger(order_id: str) -> dict:
 
 
 def _alterar_tag_kit(email: str, acao: str) -> bool:
-    api_key = os.getenv("CONVERTKIT_API_KEY")
     tag_id = os.getenv("TAG_PIX_ID")
-    if not api_key or not tag_id or not email:
+    if not tag_id or not email:
+        return False
+
+    if acao == "unsubscribe":
+        credencial = os.getenv("CONVERTKIT_API_SECRET")
+        campo_credencial = "api_secret"
+    elif acao == "subscribe":
+        credencial = os.getenv("CONVERTKIT_API_KEY")
+        campo_credencial = "api_key"
+    else:
+        return False
+
+    if not credencial:
         return False
 
     resposta = requests.post(
         f"{KIT_BASE_URL}/tags/{tag_id}/{acao}",
-        json={"api_key": api_key, "email": email},
+        json={campo_credencial: credencial, "email": email},
         timeout=5,
     )
     return resposta.status_code in (200, 201, 204)
@@ -180,14 +188,15 @@ def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
     try:
         removido = _alterar_tag_kit(email, "unsubscribe")
     except Exception as exc:
-        print(f"[PIX Recovery] Falha ao reconciliar unsubscribe: {str(exc)}")
+        print(f"[PIX Recovery] Falha no unsubscribe: {type(exc).__name__}")
         return False
 
     if not removido:
-        print(f"[PIX Recovery] Unsubscribe pendente para order_id: {order_id}")
+        print("[PIX Recovery] Unsubscribe permaneceu pendente")
         return False
 
     if bool(ledger.get("subscribe_attempted")):
+        # Mantemos pending como evidencia duravel contra efeito remoto tardio.
         return True
 
     return confirmar_cancelamento(order_id)
@@ -202,7 +211,6 @@ def processar_pix_criado(dados):
     info = _dados_pix(dados)
     order_id = info["order_id"]
     email = info["email"]
-    print(f"[PIX DEBUG] worker_started has_order_id={bool(order_id)} has_email={bool(email)}")
     if not order_id or not email:
         return
 
@@ -220,7 +228,7 @@ def processar_pix_criado(dados):
         try:
             sucesso = _alterar_tag_kit(email, "subscribe")
         except Exception as exc:
-            print(f"[PIX Recovery] Resultado ambiguo do subscribe: {str(exc)}")
+            print(f"[PIX Recovery] Resultado ambiguo do subscribe: {type(exc).__name__}")
             if compensar_subscribe_concorrente(order_id, email, attempt_token):
                 return
             transicionar(order_id, attempt_token, "subscribing", "failed")
@@ -236,7 +244,7 @@ def processar_pix_criado(dados):
             compensar_subscribe_concorrente(order_id, email, attempt_token)
 
     except Exception as exc:
-        print(f"[PIX Recovery] Falha ao iniciar recovery: {str(exc)}")
+        print(f"[PIX Recovery] Falha ao iniciar recovery: {type(exc).__name__}")
         try:
             if not compensar_subscribe_concorrente(order_id, email, attempt_token):
                 transicionar(order_id, attempt_token, "subscribing", "failed")
@@ -257,46 +265,24 @@ def cancelar_pix_por_pagamento(dados):
 
         reconciliar_cancelamento(order_id, email)
     except Exception as exc:
-        print(f"[PIX Recovery] Falha ao cancelar recovery: {str(exc)}")
+        print(f"[PIX Recovery] Falha ao cancelar recovery: {type(exc).__name__}")
 
 
 @router.post("/kiwify")
 async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundTasks):
-    print("[PIX DEBUG] wrapper_entered")
-
     dados = None
     eh_pix = False
     eh_pago = False
 
-    # Instrumentacao temporaria: registra apenas a forma e os campos de
-    # classificacao do payload. Nao registra valores de cliente, PIX, IP,
-    # CPF, email, telefone, order_id ou outros dados sensiveis.
+    # Classifica antes do handler original. Starlette reutiliza o corpo para JSON valido.
+    # Em JSON invalido, o handler original continua sendo a fonte da resposta final.
     try:
         dados = await request.json()
         if isinstance(dados, dict):
-            top_keys = sorted(str(k) for k in dados.keys())
-            ordem_debug = _ordem(dados)
-            print(f"[PIX SHAPE DEBUG] top_level_keys={top_keys}")
-            print(
-                "[PIX SHAPE DEBUG] "
-                f"order_found={bool(ordem_debug)} "
-                f"order_keys={sorted(str(k) for k in ordem_debug.keys()) if ordem_debug else []}"
-            )
-            print(
-                "[PIX SHAPE DEBUG] "
-                f"webhook_event_type={_texto(ordem_debug.get('webhook_event_type'))!r} "
-                f"payment_method={_texto(ordem_debug.get('payment_method'))!r} "
-                f"order_status={_texto(ordem_debug.get('order_status'))!r} "
-                f"has_order_id={bool(_texto(ordem_debug.get('order_id')))}"
-            )
-        else:
-            print(f"[PIX SHAPE DEBUG] top_level_type={type(dados).__name__}")
-
-        eh_pix = _evento_pix_criado(dados) if isinstance(dados, dict) else False
-        eh_pago = _evento_pago(dados) if isinstance(dados, dict) else False
-        print(f"[PIX DEBUG] preclassified pix_created={eh_pix} paid={eh_pago}")
-    except Exception as exc:
-        print(f"[PIX DEBUG] preclassify_failed type={type(exc).__name__}")
+            eh_pix = _evento_pix_criado(dados)
+            eh_pago = _evento_pago(dados)
+    except Exception:
+        pass
 
     resposta = await webhook_kiwify(request, background_tasks)
 
@@ -306,11 +292,9 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
     try:
         if eh_pix:
             background_tasks.add_task(processar_pix_criado, dados)
-            print("[PIX DEBUG] pix_task_scheduled")
         elif eh_pago:
             background_tasks.add_task(cancelar_pix_por_pagamento, dados)
-            print("[PIX DEBUG] paid_task_scheduled")
     except Exception as exc:
-        print(f"[PIX Recovery] Falha ao agendar efeito adicional: {str(exc)}")
+        print(f"[PIX Recovery] Falha ao agendar efeito adicional: {type(exc).__name__}")
 
     return resposta
