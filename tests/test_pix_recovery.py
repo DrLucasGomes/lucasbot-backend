@@ -704,13 +704,16 @@ def test_pix_recovery_prints_nao_referenciam_dados_sensiveis():
 
     for chamada in prints:
         for sensivel in (
-            "email",
             "telefone",
             "cpf",
             "pix_code",
             "order_id",
             "api_key",
             "api_secret",
+            "client_id",
+            "client_secret",
+            "access_token",
+            "account_id",
         ):
             assert sensivel not in chamada
 
@@ -943,3 +946,74 @@ def test_credenciais_kiwify_ausentes_falham_sem_chamada_externa(monkeypatch):
     assert pix_recovery._obter_oauth_token_kiwify() == ""
     assert confirmar_real("order-1", {"paid"}) == {}
     assert chamadas == []
+
+
+def test_logs_kiwify_verify_sucesso_sao_sanitizados(monkeypatch, capsys):
+    segredos = {
+        "client_id": "client-id-ultrassecreto",
+        "client_secret": "client-secret-ultrassecreto",
+        "access_token": "oauth-token-ultrassecreto",
+        "account_id": "account-id-ultrassecreto",
+        "order_id": "order-id-ultrassecreto",
+        "email": "email-ultrassecreto@example.com",
+    }
+    monkeypatch.setenv("KIWIFY_API_CLIENT_ID", segredos["client_id"])
+    monkeypatch.setenv("KIWIFY_API_CLIENT_SECRET", segredos["client_secret"])
+    monkeypatch.setenv("KIWIFY_ACCOUNT_ID", segredos["account_id"])
+    pix_recovery._kiwify_oauth_cache.update(access_token="", expires_at=0.0)
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            {"access_token": segredos["access_token"], "expires_in": 3600},
+        ),
+    )
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "get",
+        lambda *args, **kwargs: FakeResponse(
+            200,
+            {
+                "id": segredos["order_id"],
+                "status": "waiting_payment",
+                "payment_method": "pix",
+                "customer": {"email": segredos["email"]},
+            },
+        ),
+    )
+
+    assert confirmar_real(
+        segredos["order_id"], pix_recovery.KIWIFY_PENDING_STATUSES, "pix"
+    )["status"] == "waiting_payment"
+    logs = capsys.readouterr().out
+
+    assert "[KIWIFY VERIFY] credentials_present=True" in logs
+    assert "[KIWIFY VERIFY] oauth_request" in logs
+    assert "[KIWIFY VERIFY] oauth_status=200" in logs
+    assert "oauth_token_present=True expires_valid=True" in logs
+    assert "[KIWIFY VERIFY] account_present=True" in logs
+    assert "[KIWIFY VERIFY] sale_request" in logs
+    assert "[KIWIFY VERIFY] sale_status=200" in logs
+    assert (
+        "identity_ok=True status=waiting_payment payment_method=pix "
+        "email_present=True"
+    ) in logs
+    assert "[KIWIFY VERIFY] accepted=True" in logs
+    for valor in segredos.values():
+        assert valor not in logs
+
+
+def test_logs_kiwify_verify_explicam_fail_closed_sem_corpo(monkeypatch, capsys):
+    instalar_consulta_kiwify(
+        monkeypatch,
+        FakeResponse(403, {"sensitive": "corpo-nao-pode-aparecer"}),
+    )
+
+    assert confirmar_real("order-nao-logada", {"paid"}) == {}
+    logs = capsys.readouterr().out
+
+    assert "[KIWIFY VERIFY] sale_status=403" in logs
+    assert "[KIWIFY VERIFY] rejected reason=sale_http_403" in logs
+    assert "order-nao-logada" not in logs
+    assert "corpo-nao-pode-aparecer" not in logs
