@@ -57,6 +57,11 @@ def _rpc_bool(nome: str, payload: dict) -> bool:
         headers=obter_headers_supabase(),
         timeout=3,
     )
+    try:
+        corpo = resposta.text[:500]
+    except Exception:
+        corpo = "<sem corpo>"
+    print(f"[PIX RPC DEBUG] rpc={nome} status={resposta.status_code} body={corpo}")
     if resposta.status_code != 200:
         return False
     try:
@@ -150,13 +155,6 @@ def _alterar_tag_kit(email: str, acao: str) -> bool:
 
 
 def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
-    """Remove a tag quando o ledger esta pending.
-
-    Se a ordem alguma vez tentou subscribe, um unsubscribe bem-sucedido NAO
-    transforma automaticamente o ledger em cancelled. Mantemos pending como
-    evidencia duravel contra efeitos remotos tardios. A finalizacao desse caso
-    exige uma reconciliacao posterior explicita.
-    """
     ledger = buscar_ledger(order_id)
     status = _texto(ledger.get("status")).lower()
     if status == "cancelled":
@@ -179,18 +177,12 @@ def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
         return False
 
     if bool(ledger.get("subscribe_attempted")):
-        # Nao escondemos uma possivel entrega tardia de subscribe. O pending
-        # continua observavel e futuros eventos podem repetir unsubscribe.
         return True
 
     return confirmar_cancelamento(order_id)
 
 
 def compensar_subscribe_concorrente(order_id: str, email: str, attempt_token: str) -> bool:
-    # Se este token ainda for a tentativa conhecida, reabre cancelled para
-    # pending. Se ja houve readquisicao stale e o token mudou, o marcador
-    # subscribe_attempted preservado no ledger faz o cancelamento permanecer
-    # pending quando paid voltar a reconciliar.
     reabrir_cancelamento(order_id, attempt_token)
     return reconciliar_cancelamento(order_id, email)
 
@@ -199,6 +191,7 @@ def processar_pix_criado(dados):
     info = _dados_pix(dados)
     order_id = info["order_id"]
     email = info["email"]
+    print(f"[PIX DEBUG] worker_started has_order_id={bool(order_id)} has_email={bool(email)}")
     if not order_id or not email:
         return
 
@@ -258,18 +251,25 @@ def cancelar_pix_por_pagamento(dados):
 
 @router.post("/kiwify")
 async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundTasks):
+    print("[PIX DEBUG] wrapper_entered")
     resposta = await webhook_kiwify(request, background_tasks)
 
     try:
         dados = await request.json()
-    except Exception:
+    except Exception as exc:
+        print(f"[PIX DEBUG] json_parse_failed type={type(exc).__name__}")
         return resposta
 
     try:
-        if _evento_pix_criado(dados):
+        eh_pix = _evento_pix_criado(dados)
+        eh_pago = _evento_pago(dados)
+        print(f"[PIX DEBUG] classified pix_created={eh_pix} paid={eh_pago}")
+        if eh_pix:
             background_tasks.add_task(processar_pix_criado, dados)
-        elif _evento_pago(dados):
+            print("[PIX DEBUG] pix_task_scheduled")
+        elif eh_pago:
             background_tasks.add_task(cancelar_pix_por_pagamento, dados)
+            print("[PIX DEBUG] paid_task_scheduled")
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao agendar efeito adicional: {str(exc)}")
 
