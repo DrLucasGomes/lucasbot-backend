@@ -73,7 +73,11 @@ Contrato operacional confirmado da Kiwify para entrada PIX:
 
 Invariantes que não podem ser quebradas:
 
-- `/kiwify` original deve ser executado uma única vez e antes da camada adicional PIX;
+- `/kiwify` original deve ser executado exatamente uma vez; a camada adicional PIX roda isoladamente em background;
+- antes de qualquer efeito PIX, confirmar a venda em `GET /v1/sales/{order_id}` com OAuth oficial da Kiwify;
+- `pix_created` exige identidade exata, método PIX e status oficial `pending`/`waiting_payment`; `paid` exige identidade exata e status oficial `paid`;
+- qualquer falha de credencial, HTTP, timeout, JSON ou divergência deve falhar fechada sem RPC/transição/tag PIX;
+- credenciais Kiwify são `KIWIFY_API_CLIENT_ID`, `KIWIFY_API_CLIENT_SECRET` e `KIWIFY_ACCOUNT_ID`; nunca entram em URL, logs ou payload persistido;
 - JSON inválido deve preservar o comportamento da rota original;
 - `order_id` é a identidade operacional da recuperação PIX;
 - cada tentativa usa `attempt_token` único como fencing token para CAS local;

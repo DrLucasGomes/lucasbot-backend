@@ -1,9 +1,11 @@
-import hmac
 import os
+import threading
+import time
+from urllib.parse import quote
 from uuid import uuid4
 
 import requests
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 
 from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
 
@@ -13,6 +15,12 @@ router = APIRouter(tags=["kiwify-pix-recovery"])
 PIX_TABLE = "recovery_pix_orders"
 KIT_BASE_URL = "https://api.convertkit.com/v3"
 PROCESSING_STALE_MINUTES = 5
+KIWIFY_API_BASE_URL = "https://public-api.kiwify.com/v1"
+KIWIFY_PENDING_STATUSES = frozenset({"pending", "waiting_payment"})
+KIWIFY_API_TIMEOUT_SECONDS = 5
+
+_kiwify_oauth_lock = threading.Lock()
+_kiwify_oauth_cache = {"access_token": "", "expires_at": 0.0}
 
 
 def _ordem(dados):
@@ -35,6 +43,114 @@ def _ordem(dados):
 
 def _texto(valor):
     return str(valor or "").strip()
+
+
+def _obter_oauth_token_kiwify() -> str:
+    """Obtém e reutiliza o OAuth da Kiwify sem expor credenciais."""
+    agora = time.monotonic()
+    token_cache = _texto(_kiwify_oauth_cache.get("access_token"))
+    if token_cache and agora < float(_kiwify_oauth_cache.get("expires_at") or 0):
+        return token_cache
+
+    client_id = _texto(os.getenv("KIWIFY_API_CLIENT_ID"))
+    client_secret = _texto(os.getenv("KIWIFY_API_CLIENT_SECRET"))
+    if not client_id or not client_secret:
+        return ""
+
+    with _kiwify_oauth_lock:
+        agora = time.monotonic()
+        token_cache = _texto(_kiwify_oauth_cache.get("access_token"))
+        if token_cache and agora < float(_kiwify_oauth_cache.get("expires_at") or 0):
+            return token_cache
+
+        try:
+            resposta = requests.post(
+                f"{KIWIFY_API_BASE_URL}/oauth/token",
+                data={"client_id": client_id, "client_secret": client_secret},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=KIWIFY_API_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            return ""
+
+        if resposta.status_code != 200:
+            return ""
+
+        try:
+            corpo = resposta.json()
+        except Exception:
+            return ""
+        if not isinstance(corpo, dict):
+            return ""
+
+        access_token = _texto(corpo.get("access_token"))
+        try:
+            expires_in = max(int(corpo.get("expires_in") or 0), 0)
+        except (TypeError, ValueError):
+            return ""
+        if not access_token or expires_in <= 0:
+            return ""
+
+        # Renova com margem para nunca usar token no limite da expiração.
+        ttl_cache = max(expires_in - 60, 1)
+        _kiwify_oauth_cache["access_token"] = access_token
+        _kiwify_oauth_cache["expires_at"] = time.monotonic() + ttl_cache
+        return access_token
+
+
+def confirmar_venda_kiwify(
+    order_id: str,
+    statuses_aceitos,
+    payment_method_esperado: str | None = None,
+) -> dict:
+    """Retorna somente dados mínimos de uma venda confirmada; falhas fecham o fluxo."""
+    order_id = _texto(order_id)
+    account_id = _texto(os.getenv("KIWIFY_ACCOUNT_ID"))
+    access_token = _obter_oauth_token_kiwify()
+    if not order_id or not account_id or not access_token:
+        return {}
+
+    try:
+        resposta = requests.get(
+            f"{KIWIFY_API_BASE_URL}/sales/{quote(order_id, safe='')}",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "x-kiwify-account-id": account_id,
+            },
+            timeout=KIWIFY_API_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        return {}
+
+    if resposta.status_code != 200:
+        return {}
+
+    try:
+        venda = resposta.json()
+    except Exception:
+        return {}
+    if not isinstance(venda, dict) or _texto(venda.get("id")) != order_id:
+        return {}
+
+    status = _texto(venda.get("status")).lower()
+    statuses_normalizados = {_texto(item).lower() for item in statuses_aceitos}
+    if status not in statuses_normalizados:
+        return {}
+
+    payment_method = _texto(venda.get("payment_method")).lower()
+    if payment_method_esperado and payment_method != _texto(payment_method_esperado).lower():
+        return {}
+
+    customer = venda.get("customer")
+    if not isinstance(customer, dict):
+        customer = {}
+
+    return {
+        "id": order_id,
+        "status": status,
+        "payment_method": payment_method,
+        "email": _texto(customer.get("email")),
+    }
 
 
 def _evento_pix_criado(dados) -> bool:
@@ -209,10 +325,21 @@ def compensar_subscribe_concorrente(order_id: str, email: str, attempt_token: st
 
 
 def processar_pix_criado(dados):
+    if not _evento_pix_criado(dados):
+        return
+
     info = _dados_pix(dados)
     order_id = info["order_id"]
-    email = info["email"]
-    if not order_id or not email:
+    if not order_id:
+        return
+
+    venda = confirmar_venda_kiwify(
+        order_id,
+        statuses_aceitos=KIWIFY_PENDING_STATUSES,
+        payment_method_esperado="pix",
+    )
+    email = _texto(venda.get("email"))
+    if not venda or not email:
         return
 
     attempt_token = str(uuid4())
@@ -254,11 +381,18 @@ def processar_pix_criado(dados):
 
 
 def cancelar_pix_por_pagamento(dados):
+    if not _evento_pago(dados):
+        return
+
     info = _dados_pix(dados)
     order_id = info["order_id"]
-    email = info["email"]
     if not order_id:
         return
+
+    venda = confirmar_venda_kiwify(order_id, statuses_aceitos={"paid"})
+    if not venda:
+        return
+    email = _texto(venda.get("email"))
 
     try:
         if not persistir_cancelamento(order_id, email):
@@ -269,21 +403,8 @@ def cancelar_pix_por_pagamento(dados):
         print(f"[PIX Recovery] Falha ao cancelar recovery: {type(exc).__name__}")
 
 
-def _validar_token_webhook(request: Request) -> None:
-    """Bloqueia chamadas que nao conhecem o segredo configurado no endpoint Kiwify."""
-    esperado = os.getenv("KIWIFY_WEBHOOK_TOKEN", "")
-    recebido = request.query_params.get("token", "")
-
-    # Fail closed: sem segredo configurado, o wrapper protegido nao processa eventos.
-    if not esperado or not recebido or not hmac.compare_digest(recebido, esperado):
-        raise HTTPException(status_code=401, detail="webhook nao autorizado")
-
-
 @router.post("/kiwify")
 async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundTasks):
-    # A autenticacao acontece antes do handler legado e antes de qualquer efeito PIX.
-    _validar_token_webhook(request)
-
     dados = None
     eh_pix = False
     eh_pago = False

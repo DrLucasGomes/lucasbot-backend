@@ -61,7 +61,11 @@ O contrato real da Kiwify foi capturado em produção em 19/08/2026. Um PIX gera
 - `payment_method = pix`;
 - `order_id` presente e estável.
 
-A recuperação PIX é isolada da lógica existente de abandono e compra. O wrapper executa primeiro o `/kiwify` original e somente depois agenda efeitos adicionais de PIX; falha na camada PIX não pode alterar a resposta do webhook principal.
+A recuperação PIX é isolada da lógica existente de abandono e compra. O wrapper executa o `/kiwify` original exatamente uma vez e agenda separadamente os efeitos adicionais de PIX; falha na camada PIX não pode alterar a resposta do webhook principal.
+
+Antes de qualquer RPC do ledger ou alteração de tag PIX, o worker confirma a venda server-to-server em `GET https://public-api.kiwify.com/v1/sales/{order_id}`. A autenticação oficial usa OAuth obtido com `KIWIFY_API_CLIENT_ID` e `KIWIFY_API_CLIENT_SECRET`, reutilizado em memória conforme `expires_in`, e `KIWIFY_ACCOUNT_ID` no header `x-kiwify-account-id`. Não há segredo em query string e o parâmetro `signature` do webhook não é usado sem especificação pública para validá-lo.
+
+Para `pix_created`, a API deve devolver o mesmo `id`, `payment_method=pix` e status `pending` ou `waiting_payment`. Para pagamento, deve devolver o mesmo `id` e `status=paid`. O email usado no efeito Kit vem da resposta oficial. Credencial ausente, erro HTTP, rate limit, timeout, JSON inválido ou divergência de identidade/status/método falham fechados antes de subscribe, unsubscribe ou transição do ledger PIX.
 
 `recovery_pix_orders` usa `order_id` como chave primária. Cada tentativa recebe um `attempt_token` único para fencing local. Em paralelo, `subscribe_attempted` registra de forma monotônica se **qualquer** tentativa daquela ordem já chegou a `processing -> subscribing`. Esse marcador não é substituído por retry stale e não volta para `false`.
 
