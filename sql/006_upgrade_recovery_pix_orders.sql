@@ -1,5 +1,5 @@
 -- Upgrade defensivo para ambientes onde uma versao anterior da migration 005
--- tenha sido aplicada. Idempotente e convergente para o contrato atual.
+-- tenha sido aplicada. Reaplicar sobre o schema atual nao deve reinterpretar dados.
 
 alter table if exists public.recovery_pix_orders
     add column if not exists processing_started_at timestamptz;
@@ -7,13 +7,24 @@ alter table if exists public.recovery_pix_orders
 alter table if exists public.recovery_pix_orders
     add column if not exists attempt_token text;
 
--- O backfill conservador de subscribe_attempted deve acontecer APENAS quando a
--- coluna ainda nao existe. Isso torna a migration semanticamente idempotente:
--- reaplicar a 006 nao pode reinterpretar ordens novas ja corretamente migradas.
+-- Removemos primeiro a constraint antiga para permitir converter estados legados
+-- para cancelled_pending_unsubscribe durante o backfill conservador.
+alter table if exists public.recovery_pix_orders
+    drop constraint if exists recovery_pix_orders_status_check;
+
+-- O backfill so roda se a tabela existe e a coluna ainda nao existia.
 do $$
 declare
+    tabela_existe boolean;
     subscribe_attempted_ja_existia boolean;
 begin
+    select to_regclass('public.recovery_pix_orders') is not null
+      into tabela_existe;
+
+    if not tabela_existe then
+        return;
+    end if;
+
     select exists (
         select 1
           from information_schema.columns
@@ -26,9 +37,6 @@ begin
         alter table public.recovery_pix_orders
             add column subscribe_attempted boolean not null default false;
 
-        -- Converte somente dados do schema legado. Estados que ja chegaram a
-        -- subscribing/completed/failed/cancelamento sao tratados de forma
-        -- conservadora como tendo possivel efeito remoto de subscribe.
         update public.recovery_pix_orders
            set subscribe_attempted = true
          where status in (
@@ -39,7 +47,6 @@ begin
             'cancelled'
          );
 
-        -- Cancelled legado com tentativa conhecida volta a pending detectavel.
         update public.recovery_pix_orders
            set status = 'cancelled_pending_unsubscribe'
          where status = 'cancelled'
@@ -53,9 +60,6 @@ alter table if exists public.recovery_pix_orders
 
 alter table if exists public.recovery_pix_orders
     drop column if exists order_ref;
-
-alter table if exists public.recovery_pix_orders
-    drop constraint if exists recovery_pix_orders_status_check;
 
 alter table if exists public.recovery_pix_orders
     add constraint recovery_pix_orders_status_check
