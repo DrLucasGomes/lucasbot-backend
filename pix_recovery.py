@@ -252,18 +252,28 @@ def cancelar_pix_por_pagamento(dados):
 @router.post("/kiwify")
 async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundTasks):
     print("[PIX DEBUG] wrapper_entered")
-    resposta = await webhook_kiwify(request, background_tasks)
 
+    dados = None
+    eh_pix = False
+    eh_pago = False
+
+    # Classifica antes do handler original, enquanto o request ainda esta intacto.
+    # request.json() faz cache do corpo no Starlette; o handler original continua
+    # lendo o mesmo payload. Se o JSON for invalido, deixamos o original tratar.
     try:
         dados = await request.json()
+        eh_pix = _evento_pix_criado(dados)
+        eh_pago = _evento_pago(dados)
+        print(f"[PIX DEBUG] preclassified pix_created={eh_pix} paid={eh_pago}")
     except Exception as exc:
-        print(f"[PIX DEBUG] json_parse_failed type={type(exc).__name__}")
+        print(f"[PIX DEBUG] preclassify_failed type={type(exc).__name__}")
+
+    resposta = await webhook_kiwify(request, background_tasks)
+
+    if dados is None:
         return resposta
 
     try:
-        eh_pix = _evento_pix_criado(dados)
-        eh_pago = _evento_pago(dados)
-        print(f"[PIX DEBUG] classified pix_created={eh_pix} paid={eh_pago}")
         if eh_pix:
             background_tasks.add_task(processar_pix_criado, dados)
             print("[PIX DEBUG] pix_task_scheduled")
