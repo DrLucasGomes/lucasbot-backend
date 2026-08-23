@@ -3,6 +3,8 @@ import requests
 import os
 from urllib.parse import urlparse, parse_qs
 
+from kit_utils import primeiro_nome
+
 app = FastAPI()
 
 URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
@@ -284,7 +286,7 @@ def status_pagamento_final(status_atual, status_novo):
     return novo
 
 
-def adicionar_lead_convertkit(email: str):
+def adicionar_lead_convertkit(email: str, first_name: str = ""):
     """
     Adiciona lead comum vindo do ManyChat na tag TAG_LEAD_ID do ConvertKit/Kit.
     Esta função é chamada pelo /webhook quando o ManyChat envia um email.
@@ -310,12 +312,15 @@ def adicionar_lead_convertkit(email: str):
         "api_key": api_key,
         "email": str(email).strip()
     }
+    first_name = primeiro_nome(first_name)
+    if first_name:
+        payload["first_name"] = first_name
 
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"[ConvertKit Lead] Lead aplicado: {email} | {r.status_code} | {r.text}")
+        print(f"[ConvertKit Lead] Subscribe HTTP {r.status_code}")
     except Exception as e:
-        print(f"[ConvertKit Lead Erro] Falha ao aplicar lead: {str(e)}")
+        print(f"[ConvertKit Lead] Subscribe falhou: {type(e).__name__}")
 
 def gerenciar_tags_convertkit(email: str, status_pagamento: str):
     base_url = "https://api.convertkit.com/v3"
@@ -429,11 +434,17 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         sucesso = response.status_code in [200, 201, 204]
 
         email_lead = dados_limpos.get("email")
+        first_name = primeiro_nome(dados_limpos.get("nome"))
 
         # Novo: se o ManyChat mandou email, adiciona o lead na tag TAG_LEAD_ID do ConvertKit.
         # Roda em background para não atrasar nem quebrar a resposta do ManyChat.
         if sucesso and valor_valido(email_lead):
-            background_tasks.add_task(adicionar_lead_convertkit, email_lead)
+            if first_name:
+                background_tasks.add_task(
+                    adicionar_lead_convertkit, email_lead, first_name
+                )
+            else:
+                background_tasks.add_task(adicionar_lead_convertkit, email_lead)
 
         return {
             "status": "sucesso" if sucesso else "erro_supabase",

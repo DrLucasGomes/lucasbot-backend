@@ -103,6 +103,61 @@ def test_webhook_com_email_agenda_convertkit(monkeypatch):
     assert emails == ["lead@example.com"]
 
 
+def test_webhook_com_nome_agenda_primeiro_nome_e_persiste_nome_completo(monkeypatch):
+    chamadas_kit = []
+    persistido = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None, **kwargs):
+        persistido.update(json)
+        return FakeResponse(201, [{"id": 1}])
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+    monkeypatch.setattr(
+        main,
+        "adicionar_lead_convertkit",
+        lambda email, first_name="": chamadas_kit.append((email, first_name)),
+    )
+
+    resposta = client.post(
+        "/webhook",
+        json={
+            "manychat_id": "abc123",
+            "email": "lead@example.com",
+            "nome": "Lucas Felipe Gomes",
+        },
+    )
+
+    assert resposta.json()["status"] == "sucesso"
+    assert persistido["nome"] == "Lucas Felipe Gomes"
+    assert chamadas_kit == [("lead@example.com", "Lucas")]
+
+
+def test_webhook_normaliza_whitespace_do_primeiro_nome(monkeypatch):
+    chamadas_kit = []
+    monkeypatch.setattr(
+        main.requests,
+        "post",
+        lambda *args, **kwargs: FakeResponse(201, [{"id": 1}]),
+    )
+    monkeypatch.setattr(
+        main,
+        "adicionar_lead_convertkit",
+        lambda email, first_name="": chamadas_kit.append((email, first_name)),
+    )
+
+    resposta = client.post(
+        "/webhook",
+        json={
+            "manychat_id": "abc123",
+            "email": "lead@example.com",
+            "nome": "  Lucas  \t Felipe\nGomes  ",
+        },
+    )
+
+    assert resposta.json()["status"] == "sucesso"
+    assert chamadas_kit == [("lead@example.com", "Lucas")]
+
+
 def test_webhook_sem_email_nao_agenda_convertkit(monkeypatch):
     emails = []
 

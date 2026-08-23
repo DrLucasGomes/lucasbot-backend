@@ -8,6 +8,7 @@ from uuid import uuid4
 import requests
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
+from kit_utils import primeiro_nome as _primeiro_nome
 from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
 
 
@@ -46,16 +47,6 @@ def _ordem(dados):
 
 def _texto(valor):
     return str(valor or "").strip()
-
-
-def _primeiro_nome(valor) -> str:
-    if not isinstance(valor, str):
-        return ""
-    try:
-        nome_normalizado = " ".join(valor.strip().split())
-        return nome_normalizado.split(" ", 1)[0] if nome_normalizado else ""
-    except Exception:
-        return ""
 
 
 def _obter_oauth_token_kiwify() -> str:
