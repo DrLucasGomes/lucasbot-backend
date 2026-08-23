@@ -48,6 +48,16 @@ def _texto(valor):
     return str(valor or "").strip()
 
 
+def _primeiro_nome(valor) -> str:
+    if not isinstance(valor, str):
+        return ""
+    try:
+        nome_normalizado = " ".join(valor.strip().split())
+        return nome_normalizado.split(" ", 1)[0] if nome_normalizado else ""
+    except Exception:
+        return ""
+
+
 def _obter_oauth_token_kiwify() -> str:
     """Obtém e reutiliza o OAuth da Kiwify sem expor credenciais."""
     client_id = _texto(os.getenv("KIWIFY_API_CLIENT_ID"))
@@ -150,6 +160,7 @@ def confirmar_venda_kiwify(
     if not isinstance(customer, dict):
         customer = {}
     email = _texto(customer.get("email"))
+    first_name = _primeiro_nome(customer.get("name"))
     if not identity_ok:
         return {}
 
@@ -165,6 +176,7 @@ def confirmar_venda_kiwify(
         "status": status,
         "payment_method": payment_method,
         "email": email,
+        "first_name": first_name,
     }
 
 
@@ -363,7 +375,7 @@ def buscar_ledger(order_id: str) -> dict:
     return {}
 
 
-def _alterar_tag_kit(email: str, acao: str) -> bool:
+def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
     tag_id = os.getenv("TAG_PIX_ID")
     if not tag_id or not email:
         return False
@@ -380,9 +392,13 @@ def _alterar_tag_kit(email: str, acao: str) -> bool:
     if not credencial:
         return False
 
+    payload = {campo_credencial: credencial, "email": email}
+    if acao == "subscribe" and first_name:
+        payload["first_name"] = first_name
+
     resposta = requests.post(
         f"{KIT_BASE_URL}/tags/{tag_id}/{acao}",
-        json={campo_credencial: credencial, "email": email},
+        json=payload,
         timeout=5,
     )
     return resposta.status_code in (200, 201, 204)
@@ -447,6 +463,7 @@ def processar_pix_criado(dados):
     email = _texto(venda.get("email"))
     if not email:
         return False
+    first_name = _primeiro_nome(venda.get("first_name"))
 
     attempt_token = str(uuid4())
 
@@ -461,7 +478,10 @@ def processar_pix_criado(dados):
             return reconciliar_cancelamento(order_id, email)
 
         try:
-            sucesso = _alterar_tag_kit(email, "subscribe")
+            if first_name:
+                sucesso = _alterar_tag_kit(email, "subscribe", first_name)
+            else:
+                sucesso = _alterar_tag_kit(email, "subscribe")
         except Exception as exc:
             print(f"[PIX Recovery] Resultado ambiguo do subscribe: {type(exc).__name__}")
             if compensar_subscribe_concorrente(order_id, email, attempt_token):

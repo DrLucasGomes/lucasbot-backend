@@ -534,6 +534,58 @@ def test_subscribe_usa_somente_api_key(monkeypatch):
     assert enviados == [{"api_key": "key-value", "email": "teste@example.com"}]
 
 
+@pytest.mark.parametrize(
+    ("nome", "esperado"),
+    [
+        ("Maria de Souza", "Maria"),
+        ("  Maria  \t de\nSouza  ", "Maria"),
+        (None, ""),
+        ("   ", ""),
+        ({"name": "Maria"}, ""),
+    ],
+)
+def test_normaliza_primeiro_nome_de_forma_conservadora(nome, esperado):
+    assert pix_recovery._primeiro_nome(nome) == esperado
+
+
+def test_subscribe_com_nome_inclui_first_name(monkeypatch):
+    enviados = []
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_KEY", "key-value")
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda url, **kwargs: enviados.append(kwargs["json"]) or FakeResponse(200),
+    )
+
+    assert pix_recovery._alterar_tag_kit(
+        "teste@example.com", "subscribe", "Maria"
+    ) is True
+    assert enviados == [
+        {
+            "api_key": "key-value",
+            "email": "teste@example.com",
+            "first_name": "Maria",
+        }
+    ]
+
+
+def test_subscribe_sem_nome_nao_inclui_first_name(monkeypatch):
+    enviados = []
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_KEY", "key-value")
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda url, **kwargs: enviados.append(kwargs["json"]) or FakeResponse(200),
+    )
+
+    assert pix_recovery._alterar_tag_kit(
+        "teste@example.com", "subscribe", ""
+    ) is True
+    assert "first_name" not in enviados[0]
+
+
 def test_unsubscribe_usa_somente_api_secret(monkeypatch):
     enviados = []
     monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
@@ -549,6 +601,22 @@ def test_unsubscribe_usa_somente_api_secret(monkeypatch):
     assert enviados == [
         {"api_secret": "secret-value", "email": "teste@example.com"}
     ]
+
+
+def test_unsubscribe_nunca_inclui_first_name(monkeypatch):
+    enviados = []
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda url, **kwargs: enviados.append(kwargs["json"]) or FakeResponse(204),
+    )
+
+    assert pix_recovery._alterar_tag_kit(
+        "teste@example.com", "unsubscribe", "Maria"
+    ) is True
+    assert "first_name" not in enviados[0]
 
 
 def test_unsubscribe_sem_secret_nao_chama_kit(monkeypatch):
@@ -731,12 +799,13 @@ def venda_api(
     order_id="46bc33eb-6e53-4b4d-a8f7-72757a84b4ef",
     status="waiting_payment",
     payment_method="pix",
+    customer_name="Maria de Souza",
 ):
     return {
         "id": order_id,
         "status": status,
         "payment_method": payment_method,
-        "customer": {"email": "oficial@example.com"},
+        "customer": {"email": "oficial@example.com", "name": customer_name},
     }
 
 
@@ -773,6 +842,40 @@ def test_venda_kiwify_valida_libera_pix_created(monkeypatch):
     assert eventos == [
         ("46bc33eb-6e53-4b4d-a8f7-72757a84b4ef", "oficial@example.com")
     ]
+
+
+def test_venda_confirmada_propaga_primeiro_nome_ao_subscribe(monkeypatch):
+    instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda_api()))
+    monkeypatch.setattr(pix_recovery, "confirmar_venda_kiwify", confirmar_real)
+    enviados = []
+    monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: True)
+    monkeypatch.setattr(pix_recovery, "transicionar", lambda *args: True)
+    monkeypatch.setattr(
+        pix_recovery,
+        "_alterar_tag_kit",
+        lambda *args: enviados.append(args) or True,
+    )
+
+    assert pix_recovery.processar_pix_criado(payload_pix_plano()) is True
+    assert enviados == [("oficial@example.com", "subscribe", "Maria")]
+
+
+def test_venda_confirmada_sem_nome_preserva_subscribe_atual(monkeypatch):
+    instalar_consulta_kiwify(
+        monkeypatch, FakeResponse(200, venda_api(customer_name=None))
+    )
+    monkeypatch.setattr(pix_recovery, "confirmar_venda_kiwify", confirmar_real)
+    enviados = []
+    monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: True)
+    monkeypatch.setattr(pix_recovery, "transicionar", lambda *args: True)
+    monkeypatch.setattr(
+        pix_recovery,
+        "_alterar_tag_kit",
+        lambda *args: enviados.append(args) or True,
+    )
+
+    assert pix_recovery.processar_pix_criado(payload_pix_plano()) is True
+    assert enviados == [("oficial@example.com", "subscribe")]
 
 
 def test_venda_kiwify_valida_libera_paid(monkeypatch):
@@ -1087,6 +1190,35 @@ def test_falha_externa_mantem_job_retryable(monkeypatch, falha):
         monkeypatch.setattr(
             pix_recovery, "compensar_subscribe_concorrente", lambda *args: False
         )
+
+    assert pix_recovery.processar_job_pix("order-1", "pix_created") is False
+    assert falhas == [True]
+
+
+def test_falha_kit_com_primeiro_nome_mantem_job_retryable(monkeypatch):
+    falhas = []
+    monkeypatch.setattr(pix_recovery, "adquirir_job_pix", lambda *args: True)
+    monkeypatch.setattr(
+        pix_recovery,
+        "confirmar_venda_kiwify",
+        lambda *args, **kwargs: {
+            "id": "order-1",
+            "status": "waiting_payment",
+            "payment_method": "pix",
+            "email": "teste@example.com",
+            "first_name": "Maria",
+        },
+    )
+    monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: True)
+    monkeypatch.setattr(pix_recovery, "transicionar", lambda *args: True)
+    monkeypatch.setattr(pix_recovery, "compensar_subscribe_concorrente", lambda *args: False)
+    monkeypatch.setattr(pix_recovery, "_alterar_tag_kit", lambda *args: False)
+    monkeypatch.setattr(
+        pix_recovery,
+        "falhar_job_pix",
+        lambda order_id, event_type, token, retryable=True: falhas.append(retryable)
+        or True,
+    )
 
     assert pix_recovery.processar_job_pix("order-1", "pix_created") is False
     assert falhas == [True]
