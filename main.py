@@ -3,7 +3,7 @@ import requests
 import os
 from urllib.parse import urlparse, parse_qs
 
-from kit_utils import primeiro_nome
+from kit_utils import metadados_resposta_subscribe, primeiro_nome
 
 app = FastAPI()
 
@@ -295,11 +295,11 @@ def adicionar_lead_convertkit(email: str, first_name: str = ""):
         print("[ConvertKit Lead] Email invalido ou vazio")
         return
 
-    api_key = os.getenv("CONVERTKIT_API_KEY")
+    api_secret = os.getenv("CONVERTKIT_API_SECRET")
     tag_lead_id = os.getenv("TAG_LEAD_ID")
 
-    if not valor_valido(api_key):
-        print("[ConvertKit Lead] CONVERTKIT_API_KEY ausente")
+    if not valor_valido(api_secret):
+        print("[ConvertKit Lead] CONVERTKIT_API_SECRET ausente")
         return
 
     if not valor_valido(tag_lead_id):
@@ -309,7 +309,7 @@ def adicionar_lead_convertkit(email: str, first_name: str = ""):
     url = f"https://api.convertkit.com/v3/tags/{tag_lead_id}/subscribe"
 
     payload = {
-        "api_key": api_key,
+        "api_secret": api_secret,
         "email": str(email).strip()
     }
     first_name = primeiro_nome(first_name)
@@ -318,7 +318,15 @@ def adicionar_lead_convertkit(email: str, first_name: str = ""):
 
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"[ConvertKit Lead] Subscribe HTTP {r.status_code}")
+        json_valid, subscriber_id_present, first_name_present = (
+            metadados_resposta_subscribe(r)
+        )
+        print(
+            "[ConvertKit Lead] operation=subscribe "
+            f"status_http={r.status_code} json_valid={json_valid} "
+            f"subscriber_id_present={subscriber_id_present} "
+            f"first_name_present={first_name_present}"
+        )
     except Exception as e:
         print(f"[ConvertKit Lead] Subscribe falhou: {type(e).__name__}")
 

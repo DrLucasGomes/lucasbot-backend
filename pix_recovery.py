@@ -8,7 +8,7 @@ from uuid import uuid4
 import requests
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
-from kit_utils import primeiro_nome as _primeiro_nome
+from kit_utils import metadados_resposta_subscribe, primeiro_nome as _primeiro_nome
 from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
 
 
@@ -371,14 +371,10 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
     if not tag_id or not email:
         return False
 
-    if acao == "unsubscribe":
-        credencial = os.getenv("CONVERTKIT_API_SECRET")
-        campo_credencial = "api_secret"
-    elif acao == "subscribe":
-        credencial = os.getenv("CONVERTKIT_API_KEY")
-        campo_credencial = "api_key"
-    else:
+    if acao not in {"subscribe", "unsubscribe"}:
         return False
+    credencial = os.getenv("CONVERTKIT_API_SECRET")
+    campo_credencial = "api_secret"
 
     if not credencial:
         return False
@@ -392,6 +388,16 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
         json=payload,
         timeout=5,
     )
+    if acao == "subscribe":
+        json_valid, subscriber_id_present, first_name_present = (
+            metadados_resposta_subscribe(resposta)
+        )
+        print(
+            "[PIX Recovery] operation=subscribe "
+            f"status_http={resposta.status_code} json_valid={json_valid} "
+            f"subscriber_id_present={subscriber_id_present} "
+            f"first_name_present={first_name_present}"
+        )
     return resposta.status_code in (200, 201, 204)
 
 

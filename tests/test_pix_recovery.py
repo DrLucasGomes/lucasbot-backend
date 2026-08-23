@@ -519,7 +519,7 @@ def test_payload_plano_sem_order_id_nao_classifica_nem_inicia_worker(monkeypatch
     assert chamadas == []
 
 
-def test_subscribe_usa_somente_api_key(monkeypatch):
+def test_subscribe_usa_somente_api_secret(monkeypatch):
     enviados = []
     monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
     monkeypatch.setenv("CONVERTKIT_API_KEY", "key-value")
@@ -531,7 +531,10 @@ def test_subscribe_usa_somente_api_key(monkeypatch):
     )
 
     assert pix_recovery._alterar_tag_kit("teste@example.com", "subscribe") is True
-    assert enviados == [{"api_key": "key-value", "email": "teste@example.com"}]
+    assert enviados == [
+        {"api_secret": "secret-value", "email": "teste@example.com"}
+    ]
+    assert "api_key" not in enviados[0]
 
 
 @pytest.mark.parametrize(
@@ -552,6 +555,7 @@ def test_subscribe_com_nome_inclui_first_name(monkeypatch):
     enviados = []
     monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
     monkeypatch.setenv("CONVERTKIT_API_KEY", "key-value")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
     monkeypatch.setattr(
         pix_recovery.requests,
         "post",
@@ -563,7 +567,7 @@ def test_subscribe_com_nome_inclui_first_name(monkeypatch):
     ) is True
     assert enviados == [
         {
-            "api_key": "key-value",
+            "api_secret": "secret-value",
             "email": "teste@example.com",
             "first_name": "Maria",
         }
@@ -573,7 +577,7 @@ def test_subscribe_com_nome_inclui_first_name(monkeypatch):
 def test_subscribe_sem_nome_nao_inclui_first_name(monkeypatch):
     enviados = []
     monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key-value")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
     monkeypatch.setattr(
         pix_recovery.requests,
         "post",
@@ -584,6 +588,50 @@ def test_subscribe_sem_nome_nao_inclui_first_name(monkeypatch):
         "teste@example.com", "subscribe", ""
     ) is True
     assert "first_name" not in enviados[0]
+    assert "api_key" not in enviados[0]
+
+
+def test_subscribe_sem_secret_nao_faz_fallback_para_api_key(monkeypatch):
+    chamadas = []
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_KEY", "key-value")
+    monkeypatch.delenv("CONVERTKIT_API_SECRET", raising=False)
+    monkeypatch.setattr(
+        pix_recovery.requests, "post", lambda *args, **kwargs: chamadas.append(kwargs)
+    )
+
+    assert pix_recovery._alterar_tag_kit("teste@example.com", "subscribe") is False
+    assert chamadas == []
+
+
+def test_subscribe_loga_somente_metadados_sanitizados(monkeypatch, capsys):
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            201,
+            {
+                "subscription": {
+                    "subscriber": {"id": 123, "first_name": "Maria"}
+                }
+            },
+        ),
+    )
+
+    assert pix_recovery._alterar_tag_kit(
+        "teste@example.com", "subscribe", "Maria"
+    ) is True
+    logs = capsys.readouterr().out
+    assert "operation=subscribe" in logs
+    assert "status_http=201" in logs
+    assert "json_valid=True" in logs
+    assert "subscriber_id_present=True" in logs
+    assert "first_name_present=True" in logs
+    assert "teste@example.com" not in logs
+    assert "Maria" not in logs
+    assert "123" not in logs
 
 
 def test_unsubscribe_usa_somente_api_secret(monkeypatch):

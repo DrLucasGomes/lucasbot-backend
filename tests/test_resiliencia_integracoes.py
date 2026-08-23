@@ -26,9 +26,10 @@ class FakeResponse:
 client = TestClient(main.app)
 
 
-def test_convertkit_lead_sem_api_key_nao_faz_chamada(monkeypatch):
+def test_convertkit_lead_sem_api_secret_nao_faz_chamada(monkeypatch):
     chamadas = []
-    monkeypatch.delenv("CONVERTKIT_API_KEY", raising=False)
+    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.delenv("CONVERTKIT_API_SECRET", raising=False)
     monkeypatch.setenv("TAG_LEAD_ID", "123")
     monkeypatch.setattr(main.requests, "post", lambda *a, **k: chamadas.append((a, k)))
 
@@ -38,7 +39,7 @@ def test_convertkit_lead_sem_api_key_nao_faz_chamada(monkeypatch):
 
 def test_convertkit_lead_sem_tag_nao_faz_chamada(monkeypatch):
     chamadas = []
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.delenv("TAG_LEAD_ID", raising=False)
     monkeypatch.setattr(main.requests, "post", lambda *a, **k: chamadas.append((a, k)))
 
@@ -48,7 +49,7 @@ def test_convertkit_lead_sem_tag_nao_faz_chamada(monkeypatch):
 
 def test_convertkit_lead_email_invalido_nao_faz_chamada(monkeypatch):
     chamadas = []
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_LEAD_ID", "123")
     monkeypatch.setattr(main.requests, "post", lambda *a, **k: chamadas.append((a, k)))
 
@@ -59,6 +60,7 @@ def test_convertkit_lead_email_invalido_nao_faz_chamada(monkeypatch):
 def test_convertkit_lead_com_nome_inclui_first_name(monkeypatch):
     enviados = []
     monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_LEAD_ID", "123")
     monkeypatch.setattr(
         main.requests,
@@ -70,8 +72,13 @@ def test_convertkit_lead_com_nome_inclui_first_name(monkeypatch):
     main.adicionar_lead_convertkit("lead@example.com", "Lucas Felipe Gomes")
 
     assert enviados == [
-        {"api_key": "key", "email": "lead@example.com", "first_name": "Lucas"}
+        {
+            "api_secret": "secret",
+            "email": "lead@example.com",
+            "first_name": "Lucas",
+        }
     ]
+    assert "api_key" not in enviados[0]
 
 
 @pytest.mark.parametrize("nome", [None, "", "   ", {"nome": "Lucas"}])
@@ -79,7 +86,7 @@ def test_convertkit_lead_nome_ausente_vazio_ou_invalido_preserva_payload(
     monkeypatch, nome
 ):
     enviados = []
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_LEAD_ID", "123")
     monkeypatch.setattr(
         main.requests,
@@ -90,12 +97,12 @@ def test_convertkit_lead_nome_ausente_vazio_ou_invalido_preserva_payload(
 
     main.adicionar_lead_convertkit("lead@example.com", nome)
 
-    assert enviados == [{"api_key": "key", "email": "lead@example.com"}]
+    assert enviados == [{"api_secret": "secret", "email": "lead@example.com"}]
 
 
 def test_convertkit_lead_chamada_antiga_sem_nome_continua_funcionando(monkeypatch):
     enviados = []
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_LEAD_ID", "123")
     monkeypatch.setattr(
         main.requests,
@@ -106,31 +113,42 @@ def test_convertkit_lead_chamada_antiga_sem_nome_continua_funcionando(monkeypatc
 
     main.adicionar_lead_convertkit("lead@example.com")
 
-    assert enviados == [{"api_key": "key", "email": "lead@example.com"}]
+    assert enviados == [{"api_secret": "secret", "email": "lead@example.com"}]
 
 
 def test_convertkit_lead_logs_sao_sanitizados(monkeypatch, capsys):
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_LEAD_ID", "123")
     monkeypatch.setattr(
         main.requests,
         "post",
         lambda *args, **kwargs: FakeResponse(
-            422, {}, "response-body-com-dado-sensivel"
+            422,
+            {
+                "subscription": {
+                    "subscriber": {"id": 456, "first_name": "Lucas"}
+                }
+            },
+            "response-body-com-dado-sensivel",
         ),
     )
 
     main.adicionar_lead_convertkit("lead@example.com", "Lucas Gomes")
     logs = capsys.readouterr().out
 
-    assert "Subscribe HTTP 422" in logs
+    assert "operation=subscribe" in logs
+    assert "status_http=422" in logs
+    assert "json_valid=True" in logs
+    assert "subscriber_id_present=True" in logs
+    assert "first_name_present=True" in logs
     assert "lead@example.com" not in logs
     assert "Lucas" not in logs
+    assert "456" not in logs
     assert "response-body-com-dado-sensivel" not in logs
 
 
 def test_convertkit_lead_excecao_logada_apenas_pelo_tipo(monkeypatch, capsys):
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_LEAD_ID", "123")
 
     def falha(*args, **kwargs):
@@ -152,7 +170,7 @@ def test_falha_convertkit_lead_nao_quebra_resposta_webhook(monkeypatch):
             return FakeResponse(201, [{"id": 1}])
         raise RuntimeError("kit offline")
 
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_LEAD_ID", "123")
     monkeypatch.setattr(main.requests, "post", fake_post)
 
