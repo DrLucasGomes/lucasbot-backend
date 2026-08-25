@@ -9,6 +9,7 @@ import requests
 from fastapi import APIRouter, BackgroundTasks, Request
 
 import main
+from kit_utils import primeiro_nome
 
 router = APIRouter()
 
@@ -74,9 +75,15 @@ async def webhook_protegido(request: Request, background_tasks: BackgroundTasks)
 
         sucesso = response.status_code in (200, 201, 204)
         email_lead = dados_limpos.get("email")
+        first_name = primeiro_nome(dados_limpos.get("nome"))
 
         if sucesso and main.valor_valido(email_lead):
-            background_tasks.add_task(main.adicionar_lead_convertkit, email_lead)
+            if first_name:
+                background_tasks.add_task(
+                    main.adicionar_lead_convertkit, email_lead, first_name
+                )
+            else:
+                background_tasks.add_task(main.adicionar_lead_convertkit, email_lead)
 
         return {
             "status": "sucesso" if sucesso else "erro_supabase",
