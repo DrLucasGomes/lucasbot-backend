@@ -47,8 +47,15 @@ def preservar_first_touch(dados_limpos: dict, existente: dict) -> dict:
 
 @router.post("/webhook")
 async def webhook_protegido(request: Request, background_tasks: BackgroundTasks):
+    print("stage=manychat_wrapper_entered")
     try:
         dados_brutos = await request.json()
+        name_field_detected = (
+            isinstance(dados_brutos, dict)
+            and "nome" in dados_brutos
+            and main.valor_valido(dados_brutos.get("nome"))
+        )
+        print(f"stage=name_field_detected value={name_field_detected}")
         mc_id = dados_brutos.get("manychat_id")
 
         if not main.manychat_id_valido(mc_id):
@@ -76,8 +83,13 @@ async def webhook_protegido(request: Request, background_tasks: BackgroundTasks)
         sucesso = response.status_code in (200, 201, 204)
         email_lead = dados_limpos.get("email")
         first_name = primeiro_nome(dados_limpos.get("nome"))
+        print(f"stage=first_name_normalized value={bool(first_name)}")
 
         if sucesso and main.valor_valido(email_lead):
+            print(
+                "stage=kit_task_scheduled "
+                f"first_name_present={bool(first_name)}"
+            )
             if first_name:
                 background_tasks.add_task(
                     main.adicionar_lead_convertkit, email_lead, first_name

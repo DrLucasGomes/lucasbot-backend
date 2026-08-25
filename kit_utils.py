@@ -70,12 +70,14 @@ def atualizar_first_name_kit(subscriber_id, first_name) -> bool:
         return False
 
     try:
+        print("stage=first_name_put_attempted")
         resposta = requests.put(
             f"{KIT_BASE_URL}/subscribers/{subscriber_id}",
             json={"api_secret": api_secret, "first_name": first_name},
             timeout=KIT_TIMEOUT_SECONDS,
         )
         sucesso = resposta.status_code in (200, 201, 204)
+        print(f"stage=first_name_put_completed success={sucesso}")
         print(f"[PIX E2E] stage=first_name_put_completed success={sucesso}")
         print(
             "[Kit Subscriber] operation=update_first_name "
@@ -83,6 +85,7 @@ def atualizar_first_name_kit(subscriber_id, first_name) -> bool:
         )
         return sucesso
     except Exception as exc:
+        print("stage=first_name_put_completed success=False")
         print("[PIX E2E] stage=first_name_put_failed")
         print(
             "[Kit Subscriber] operation=update_first_name "

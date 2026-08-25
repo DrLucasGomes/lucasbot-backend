@@ -77,7 +77,15 @@ def test_wrapper_com_nome_normaliza_e_encaminha_first_name(
         "convertkit_lead_agendado": True,
         "resposta_supabase": [{"ok": True}],
     }
-    assert capsys.readouterr().out == ""
+    logs = capsys.readouterr().out
+    assert logs.splitlines() == [
+        "stage=manychat_wrapper_entered",
+        "stage=name_field_detected value=True",
+        "stage=first_name_normalized value=True",
+        "stage=kit_task_scheduled first_name_present=True",
+    ]
+    for pii in ("abc123", "lead@example.com", "Lucas", "Felipe", "Gomes"):
+        assert pii not in logs
 
 
 @pytest.mark.parametrize("nome", [None, "", "   ", "{{nome}}"])
