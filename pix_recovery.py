@@ -219,10 +219,13 @@ def _rpc_bool(nome: str, payload: dict) -> bool:
 
 
 def enfileirar_job_pix(order_id: str, event_type: str) -> bool:
-    return _rpc_bool(
+    print("[PIX E2E] stage=enqueue_entered")
+    sucesso = _rpc_bool(
         "recovery_pix_job_enqueue",
         {"p_order_id": order_id, "p_event_type": event_type},
     )
+    print(f"[PIX E2E] stage=enqueue_completed success={sucesso}")
+    return sucesso
 
 
 def adquirir_job_pix(order_id: str, event_type: str, attempt_token: str) -> bool:
@@ -372,6 +375,7 @@ def buscar_ledger(order_id: str) -> dict:
 
 
 def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
+    print(f"[PIX E2E] stage=alter_tag_entered subscribe={acao == 'subscribe'}")
     tag_id = os.getenv("TAG_PIX_ID")
     if not tag_id or not email:
         return False
@@ -391,7 +395,9 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
         json=payload,
         timeout=5,
     )
+    print("[PIX E2E] stage=tag_request_completed")
     if acao == "subscribe":
+        print("[PIX E2E] stage=subscribe_parser_entered")
         json_valid, subscriber_id_present, first_name_present = (
             metadados_resposta_subscribe(resposta)
         )
@@ -404,7 +410,12 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
     tag_success = resposta.status_code in (200, 201, 204)
     if acao == "subscribe" and tag_success and first_name:
         subscriber_id = extrair_subscriber_id(resposta)
+        print(
+            "[PIX E2E] stage=first_name_sync_decision "
+            f"subscriber_id_valid={subscriber_id is not None}"
+        )
         if subscriber_id is not None:
+            print("[PIX E2E] stage=first_name_helper_call")
             atualizar_first_name_kit(subscriber_id, first_name)
     return tag_success
 
@@ -444,8 +455,11 @@ def compensar_subscribe_concorrente(order_id: str, email: str, attempt_token: st
 
 
 def processar_pix_criado(dados):
+    print("[PIX E2E] stage=pix_effect_entered")
     if not _evento_pix_criado(dados):
+        print("[PIX E2E] stage=pix_effect_classified value=False")
         return False
+    print("[PIX E2E] stage=pix_effect_classified value=True")
 
     info = _dados_pix(dados)
     order_id = info["order_id"]
@@ -457,6 +471,7 @@ def processar_pix_criado(dados):
         statuses_aceitos=KIWIFY_PENDING_STATUSES,
         payment_method_esperado="pix",
     )
+    print(f"[PIX E2E] stage=kiwify_sale_confirmed value={bool(venda)}")
     if not venda:
         ledger = buscar_ledger(order_id)
         if _texto(ledger.get("status")).lower() in {
@@ -474,10 +489,12 @@ def processar_pix_criado(dados):
 
     try:
         if not adquirir_processamento(order_id, email, attempt_token):
+            print("[PIX E2E] stage=ledger_acquired value=False")
             ledger = buscar_ledger(order_id)
             if _texto(ledger.get("status")).lower() == "completed":
                 return True
             return reconciliar_cancelamento(order_id, email)
+        print("[PIX E2E] stage=ledger_acquired value=True")
 
         if not transicionar(order_id, attempt_token, "processing", "subscribing"):
             return reconciliar_cancelamento(order_id, email)
@@ -556,6 +573,7 @@ def _payload_minimo_job(order_id: str, event_type: str) -> dict:
 
 
 def processar_job_pix(order_id: str, event_type: str) -> bool:
+    print(f"[PIX E2E] stage=worker_entered pix_created={event_type == 'pix_created'}")
     """Adquire um job durável e finaliza somente sob o mesmo fencing token."""
     order_id = _texto(order_id)
     event_type = _texto(event_type)
@@ -564,11 +582,14 @@ def processar_job_pix(order_id: str, event_type: str) -> bool:
 
     attempt_token = str(uuid4())
     if not adquirir_job_pix(order_id, event_type, attempt_token):
+        print("[PIX E2E] stage=job_acquired value=False")
         return False
+    print("[PIX E2E] stage=job_acquired value=True")
 
     try:
         payload = _payload_minimo_job(order_id, event_type)
         if event_type == "pix_created":
+            print("[PIX E2E] stage=worker_dispatch_pix")
             sucesso = processar_pix_criado(payload)
         else:
             sucesso = cancelar_pix_por_pagamento(payload)
@@ -620,6 +641,7 @@ async def reconciliar_jobs_pix_endpoint(request: Request):
 
 @router.post("/kiwify")
 async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundTasks):
+    print("[PIX E2E] stage=wrapper_entered")
     dados = None
     eh_pix = False
     eh_pago = False
@@ -635,12 +657,17 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
         pass
 
     event_type = "pix_created" if eh_pix else "paid" if eh_pago else ""
+    print(
+        "[PIX E2E] stage=payload_classified "
+        f"pix_created={eh_pix} paid={eh_pago}"
+    )
     order_id = _dados_pix(dados).get("order_id") if event_type else ""
     job_persistido = True
     if event_type:
         job_persistido = enfileirar_job_pix(order_id, event_type)
 
     resposta = await webhook_kiwify(request, background_tasks)
+    print("[PIX E2E] stage=original_handler_completed")
 
     if not job_persistido:
         print("[PIX Job] Falha ao persistir evento antes do ACK")
@@ -652,8 +679,10 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
     try:
         if eh_pix:
             background_tasks.add_task(processar_job_pix, order_id, event_type)
+            print("[PIX E2E] stage=worker_scheduled pix_created=True")
         elif eh_pago:
             background_tasks.add_task(processar_job_pix, order_id, event_type)
+            print("[PIX E2E] stage=worker_scheduled paid=True")
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao agendar efeito adicional: {type(exc).__name__}")
 
