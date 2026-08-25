@@ -157,6 +157,56 @@ def test_falha_do_kit_marca_failed_com_token(monkeypatch):
     assert ("attempt-2", "subscribing", "completed") not in transicoes
 
 
+def test_falha_exclusiva_do_first_name_conclui_pix_sem_compensacao(monkeypatch):
+    transicoes = []
+    compensacoes = []
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
+    monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: True)
+    monkeypatch.setattr(
+        pix_recovery,
+        "transicionar",
+        lambda order_id, token, origem, destino: transicoes.append(
+            (origem, destino)
+        ) or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "compensar_subscribe_concorrente",
+        lambda *args: compensacoes.append(args) or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "confirmar_venda_kiwify",
+        lambda *args, **kwargs: {
+            "id": args[0],
+            "status": "waiting_payment",
+            "payment_method": "pix",
+            "email": "teste@example.com",
+            "first_name": "Maria",
+        },
+    )
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda *a, **k: FakeResponse(
+            200, {"subscription": {"subscriber": {"id": 123}}}
+        ),
+    )
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "put",
+        lambda *a, **k: (_ for _ in ()).throw(TimeoutError("timeout")),
+    )
+
+    assert pix_recovery.processar_pix_criado(payload_pix()) is True
+    assert transicoes == [
+        ("processing", "subscribing"),
+        ("subscribing", "completed"),
+    ]
+    assert compensacoes == []
+
+
 def test_paid_antes_pix_impede_subscribe(monkeypatch):
     eventos = []
     monkeypatch.setattr(pix_recovery, "persistir_cancelamento", lambda *args: True)
@@ -551,26 +601,36 @@ def test_normaliza_primeiro_nome_de_forma_conservadora(nome, esperado):
     assert pix_recovery._primeiro_nome(nome) == esperado
 
 
-def test_subscribe_com_nome_inclui_first_name(monkeypatch):
-    enviados = []
+def test_subscribe_com_nome_atualiza_subscriber_via_put(monkeypatch):
+    posts = []
+    puts = []
     monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
     monkeypatch.setenv("CONVERTKIT_API_KEY", "key-value")
     monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
     monkeypatch.setattr(
         pix_recovery.requests,
         "post",
-        lambda url, **kwargs: enviados.append(kwargs["json"]) or FakeResponse(200),
+        lambda url, **kwargs: posts.append(kwargs["json"])
+        or FakeResponse(200, {"subscription": {"subscriber": {"id": 123}}}),
+    )
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "put",
+        lambda url, **kwargs: puts.append((url, kwargs)) or FakeResponse(200),
     )
 
     assert pix_recovery._alterar_tag_kit(
         "teste@example.com", "subscribe", "Maria"
     ) is True
-    assert enviados == [
-        {
-            "api_secret": "secret-value",
-            "email": "teste@example.com",
-            "first_name": "Maria",
-        }
+    assert posts == [{"api_secret": "secret-value", "email": "teste@example.com"}]
+    assert puts == [
+        (
+            "https://api.convertkit.com/v3/subscribers/123",
+            {
+                "json": {"api_secret": "secret-value", "first_name": "Maria"},
+                "timeout": 5,
+            },
+        )
     ]
 
 
@@ -589,6 +649,51 @@ def test_subscribe_sem_nome_nao_inclui_first_name(monkeypatch):
     ) is True
     assert "first_name" not in enviados[0]
     assert "api_key" not in enviados[0]
+
+
+@pytest.mark.parametrize(
+    "put_result",
+    [FakeResponse(400), FakeResponse(500), TimeoutError("timeout"), RuntimeError("erro")],
+)
+def test_falha_do_put_nao_altera_sucesso_da_tag_pix(monkeypatch, put_result):
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda *a, **k: FakeResponse(
+            200, {"subscription": {"subscriber": {"id": 123}}}
+        ),
+    )
+
+    def put(*args, **kwargs):
+        if isinstance(put_result, Exception):
+            raise put_result
+        return put_result
+
+    monkeypatch.setattr(pix_recovery.requests, "put", put)
+
+    assert pix_recovery._alterar_tag_kit(
+        "teste@example.com", "subscribe", "Maria"
+    ) is True
+
+
+@pytest.mark.parametrize("json_data", [{}, ValueError("json invalido")])
+def test_subscribe_sem_id_ou_json_valido_preserva_sucesso(monkeypatch, json_data):
+    puts = []
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
+    monkeypatch.setattr(
+        pix_recovery.requests, "post", lambda *a, **k: FakeResponse(200, json_data)
+    )
+    monkeypatch.setattr(
+        pix_recovery.requests, "put", lambda *a, **k: puts.append((a, k))
+    )
+
+    assert pix_recovery._alterar_tag_kit(
+        "teste@example.com", "subscribe", "Maria"
+    ) is True
+    assert puts == []
 
 
 def test_subscribe_sem_secret_nao_faz_fallback_para_api_key(monkeypatch):

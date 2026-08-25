@@ -8,7 +8,12 @@ from uuid import uuid4
 import requests
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
-from kit_utils import metadados_resposta_subscribe, primeiro_nome as _primeiro_nome
+from kit_utils import (
+    atualizar_first_name_kit,
+    extrair_subscriber_id,
+    metadados_resposta_subscribe,
+    primeiro_nome as _primeiro_nome,
+)
 from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
 
 
@@ -380,8 +385,6 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
         return False
 
     payload = {campo_credencial: credencial, "email": email}
-    if acao == "subscribe" and first_name:
-        payload["first_name"] = first_name
 
     resposta = requests.post(
         f"{KIT_BASE_URL}/tags/{tag_id}/{acao}",
@@ -398,7 +401,12 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
             f"subscriber_id_present={subscriber_id_present} "
             f"first_name_present={first_name_present}"
         )
-    return resposta.status_code in (200, 201, 204)
+    tag_success = resposta.status_code in (200, 201, 204)
+    if acao == "subscribe" and tag_success and first_name:
+        subscriber_id = extrair_subscriber_id(resposta)
+        if subscriber_id is not None:
+            atualizar_first_name_kit(subscriber_id, first_name)
+    return tag_success
 
 
 def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
