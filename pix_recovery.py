@@ -374,19 +374,21 @@ def buscar_ledger(order_id: str) -> dict:
     return {}
 
 
-def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
+def _alterar_tag_kit_detalhado(
+    email: str, acao: str, first_name: str = ""
+) -> tuple[bool, bool, bool]:
     print(f"[PIX E2E] stage=alter_tag_entered subscribe={acao == 'subscribe'}")
     tag_id = os.getenv("TAG_PIX_ID")
     if not tag_id or not email:
-        return False
+        return False, False, False
 
     if acao not in {"subscribe", "unsubscribe"}:
-        return False
+        return False, False, False
     credencial = os.getenv("CONVERTKIT_API_SECRET")
     campo_credencial = "api_secret"
 
     if not credencial:
-        return False
+        return False, False, False
 
     payload = {campo_credencial: credencial, "email": email}
 
@@ -408,6 +410,8 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
             f"first_name_present={first_name_present}"
         )
     tag_success = resposta.status_code in (200, 201, 204)
+    first_name_sync_attempted = False
+    first_name_sync_success = False
     if acao == "subscribe" and tag_success and first_name:
         subscriber_id = extrair_subscriber_id(resposta)
         print(
@@ -416,7 +420,15 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
         )
         if subscriber_id is not None:
             print("[PIX E2E] stage=first_name_helper_call")
-            atualizar_first_name_kit(subscriber_id, first_name)
+            first_name_sync_attempted = True
+            first_name_sync_success = atualizar_first_name_kit(
+                subscriber_id, first_name
+            )
+    return tag_success, first_name_sync_attempted, first_name_sync_success
+
+
+def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
+    tag_success, _, _ = _alterar_tag_kit_detalhado(email, acao, first_name)
     return tag_success
 
 
@@ -637,6 +649,57 @@ def _autorizar_reconciliacao(request: Request) -> None:
 async def reconciliar_jobs_pix_endpoint(request: Request):
     _autorizar_reconciliacao(request)
     return reconciliar_jobs_pix()
+
+
+# TEMPORARIO: endpoint isolado para o E2E da branch fix/kit-first-name.
+# Recebe apenas o order_id; nao usa inbox duravel, ledger ou webhook legado.
+@router.post("/internal/e2e/kit-first-name/{order_id}")
+async def e2e_kit_first_name_endpoint(order_id: str, request: Request):
+    _autorizar_reconciliacao(request)
+    resultado = {
+        "verified": False,
+        "tag_success": False,
+        "first_name_sync_attempted": False,
+        "first_name_sync_success": False,
+    }
+
+    venda = confirmar_venda_kiwify(
+        order_id,
+        statuses_aceitos=KIWIFY_PENDING_STATUSES,
+        payment_method_esperado="pix",
+    )
+    email = _texto(venda.get("email"))
+    first_name = _primeiro_nome(venda.get("first_name"))
+    status = _texto(venda.get("status")).lower()
+    payment_method = _texto(venda.get("payment_method")).lower()
+    venda_valida = (
+        bool(venda)
+        and payment_method == "pix"
+        and status in KIWIFY_PENDING_STATUSES
+        and bool(email)
+        and bool(first_name)
+    )
+    print(f"[PIX E2E Direct] stage=sale_verified value={venda_valida}")
+    if not venda_valida:
+        return resultado
+
+    resultado["verified"] = True
+    try:
+        tag_success, sync_attempted, sync_success = _alterar_tag_kit_detalhado(
+            email, "subscribe", first_name
+        )
+    except Exception:
+        print("[PIX E2E Direct] stage=kit_effect_failed")
+        return resultado
+
+    resultado.update(
+        {
+            "tag_success": tag_success,
+            "first_name_sync_attempted": sync_attempted,
+            "first_name_sync_success": sync_success,
+        }
+    )
+    return resultado
 
 
 @router.post("/kiwify")
