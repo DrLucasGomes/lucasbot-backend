@@ -35,3 +35,24 @@ atribuição ou UTM adicional.
 Não há backfill com `created_at` ou `updated_at`: a atribuição confiável começa
 quando a migration 009 for aplicada. Pedidos anteriores podem permanecer com os
 dois timestamps nulos.
+
+## Validação em produção
+
+A migration 009 foi aplicada em produção e validada com um E2E real na ordem
+`bce89324-3dff-4bcb-89e4-10b035a9867b`.
+
+Antes do pagamento, a view apresentou `recovery_completed_at` preenchido em
+`2026-08-26 17:51:57.444436+00`, `paid_confirmed_at` nulo,
+`recovery_conversion=false` e delay nulo. Depois do pagamento da mesma ordem,
+`recovery_completed_at` permaneceu inalterado, `paid_confirmed_at` foi preenchido
+em `2026-08-26 17:56:34.323816+00`, `recovery_conversion=true` e
+`conversion_delay_seconds=276.879380`.
+
+O E2E confirmou a progressão temporal recovery -> paid e o comportamento
+write-once de `recovery_completed_at`.
+
+## Touch-level de emails
+
+Atribuição por `email_1`, `email_2` ou `email_3` não foi implementada. Essa
+extensão fica adiada até existir necessidade analítica comprovada e uma fonte
+confiável de eventos do Kit que diferencie envio real, programação e clique.
