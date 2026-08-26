@@ -92,3 +92,16 @@ A tag de entrada será própria do PIX (`TAG_PIX_ID` no Render, tag `pix-gerado-
 A instalação limpa do ledger usa `sql/005_create_recovery_pix_orders.sql`. `sql/006_upgrade_recovery_pix_orders.sql` converge versões anteriores, `sql/007_create_recovery_pix_jobs.sql` cria a inbox durável e `sql/008_harden_recovery_pix_permissions.sql` aplica RLS/permissões finais tanto em instalações novas quanto já migradas.
 
 O E2E real Kiwify -> Render -> Supabase -> Kit foi aprovado em 21/08/2026, incluindo falha inicial, retry após restart/reconciliação, conclusão na terceira tentativa, aplicação e remoção da tag PIX, preservação da tag de comprador e fila final sem candidatos.
+
+## Recuperacao durable de boleto - fase 1
+
+O boleto usa o contrato estrito `billet_created` + `payment_method=boleto` +
+`order_status=waiting_payment`. A inbox e o ledger PIX sao ampliados por
+compatibilidade para aceitar o metodo boleto, preservando CAS, fencing, retries,
+reconciler e as RPCs existentes. A tag de entrada e exclusiva
+(`TAG_BOLETO_ID`) e recebe `first_name` no proprio POST de subscribe.
+
+`boleto_expiry_date` e convertido de `DD/MM/YYYY` para `expires_at`, sem persistir
+URL ou codigo de barras. Nesta fase o vencimento nao dispara nenhuma acao.
+Confirmar o contrato Kiwify de boleto expirado e uma pendencia obrigatoria antes
+de automatizar retirada da recuperacao.

@@ -103,6 +103,11 @@ Invariantes que não podem ser quebradas:
 - falha da camada PIX não pode impedir compra/abandono no `/kiwify`;
 - não persistir/logar CPF, IP, `pix_code`, QR Code ou payload de pagamento;
 - PIX usa `TAG_PIX_ID` próprio, nunca `TAG_ABANDONO_ID`;
+- boleto usa `TAG_BOLETO_ID` proprio e nunca pode remover `TAG_PIX_ID`;
+- boleto exige exatamente `billet_created`, `payment_method=boleto` e
+  `order_status=waiting_payment`;
+- `expires_at` de boleto e apenas informativo na fase 1: nao criar timer, sleep
+  ou cancelamento por relogio sem confirmar o contrato de expiracao da Kiwify;
 - RPCs `SECURITY DEFINER` são restritas a `service_role`;
 - instalação limpa do ledger usa `005_create_recovery_pix_orders.sql`; upgrade defensivo usa `006_upgrade_recovery_pix_orders.sql`; a inbox durável usa `007_create_recovery_pix_jobs.sql`; permissões finais convergem por `008_harden_recovery_pix_permissions.sql`.
 
