@@ -164,8 +164,10 @@ def test_processamento_usa_link_confirmado_e_ignora_url_do_webhook(monkeypatch):
     ]
 
 
-def test_sem_boleto_url_confirmada_nao_inicia_ledger_nem_sequence(monkeypatch):
+def test_sem_link_confirmado_ou_webhook_nao_inicia_ledger_nem_sequence(monkeypatch):
     efeitos = []
+    payload = payload_boleto()
+    payload["order"]["boleto_URL"] = ""
     monkeypatch.setattr(
         pix_recovery,
         "confirmar_venda_kiwify",
@@ -188,5 +190,5 @@ def test_sem_boleto_url_confirmada_nao_inicia_ledger_nem_sequence(monkeypatch):
         lambda *a, **k: efeitos.append("kit") or True,
     )
 
-    assert pix_recovery.processar_boleto_criado(payload_boleto()) is False
+    assert pix_recovery.processar_boleto_criado(payload) is False
     assert efeitos == []
