@@ -60,33 +60,25 @@ def extrair_subscriber_id(resposta):
 
 
 def atualizar_first_name_kit(subscriber_id, first_name) -> bool:
-    print("[PIX E2E] stage=first_name_helper_entered")
     subscriber_id = _subscriber_id_valido(subscriber_id)
     first_name = primeiro_nome(first_name)
     api_secret = os.getenv("CONVERTKIT_API_SECRET")
-    entradas_validas = subscriber_id is not None and bool(first_name) and bool(api_secret)
-    print(f"[PIX E2E] stage=first_name_inputs_valid value={entradas_validas}")
-    if not entradas_validas:
+    if subscriber_id is None or not first_name or not api_secret:
         return False
 
     try:
-        print("stage=first_name_put_attempted", flush=True)
         resposta = requests.put(
             f"{KIT_BASE_URL}/subscribers/{subscriber_id}",
             json={"api_secret": api_secret, "first_name": first_name},
             timeout=KIT_TIMEOUT_SECONDS,
         )
         sucesso = resposta.status_code in (200, 201, 204)
-        print(f"stage=first_name_put_completed success={sucesso}", flush=True)
-        print(f"[PIX E2E] stage=first_name_put_completed success={sucesso}")
         print(
             "[Kit Subscriber] operation=update_first_name "
             f"status_http={resposta.status_code} success={sucesso}"
         )
         return sucesso
     except Exception as exc:
-        print("stage=first_name_put_completed success=False", flush=True)
-        print("[PIX E2E] stage=first_name_put_failed")
         print(
             "[Kit Subscriber] operation=update_first_name "
             f"failed={type(exc).__name__}"

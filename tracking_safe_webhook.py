@@ -7,31 +7,11 @@ pode sobrescrever esses campos (ex.: WhatsApp Direto / Fallback_Entrada).
 
 import requests
 from fastapi import APIRouter, BackgroundTasks, Request
-from starlette.concurrency import run_in_threadpool
 
 import main
 from kit_utils import primeiro_nome
 
 router = APIRouter()
-
-
-async def diagnosticar_background_kit(email_lead, first_name):
-    print("stage=kit_background_callable_entered", flush=True)
-    try:
-        print("stage=kit_threadpool_dispatch_started", flush=True)
-        await run_in_threadpool(
-            main.adicionar_lead_convertkit, email_lead, first_name
-        )
-        print(
-            "stage=kit_threadpool_dispatch_completed success=True",
-            flush=True,
-        )
-    except Exception:
-        print(
-            "stage=kit_threadpool_dispatch_completed success=False",
-            flush=True,
-        )
-        raise
 
 
 def buscar_atribuicao_existente(manychat_id: str) -> dict:
@@ -67,15 +47,8 @@ def preservar_first_touch(dados_limpos: dict, existente: dict) -> dict:
 
 @router.post("/webhook")
 async def webhook_protegido(request: Request, background_tasks: BackgroundTasks):
-    print("stage=manychat_wrapper_entered")
     try:
         dados_brutos = await request.json()
-        name_field_detected = (
-            isinstance(dados_brutos, dict)
-            and "nome" in dados_brutos
-            and main.valor_valido(dados_brutos.get("nome"))
-        )
-        print(f"stage=name_field_detected value={name_field_detected}")
         mc_id = dados_brutos.get("manychat_id")
 
         if not main.manychat_id_valido(mc_id):
@@ -103,16 +76,14 @@ async def webhook_protegido(request: Request, background_tasks: BackgroundTasks)
         sucesso = response.status_code in (200, 201, 204)
         email_lead = dados_limpos.get("email")
         first_name = primeiro_nome(dados_limpos.get("nome"))
-        print(f"stage=first_name_normalized value={bool(first_name)}")
 
         if sucesso and main.valor_valido(email_lead):
-            print(
-                "stage=kit_task_scheduled "
-                f"first_name_present={bool(first_name)}"
-            )
-            background_tasks.add_task(
-                diagnosticar_background_kit, email_lead, first_name
-            )
+            if first_name:
+                background_tasks.add_task(
+                    main.adicionar_lead_convertkit, email_lead, first_name
+                )
+            else:
+                background_tasks.add_task(main.adicionar_lead_convertkit, email_lead)
 
         return {
             "status": "sucesso" if sucesso else "erro_supabase",

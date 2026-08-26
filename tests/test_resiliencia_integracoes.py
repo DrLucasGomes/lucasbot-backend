@@ -90,40 +90,6 @@ def test_convertkit_lead_com_nome_atualiza_subscriber_via_put(monkeypatch):
     assert "email" not in puts[0][1]["json"]
 
 
-def test_convertkit_lead_instrumenta_estagios_sem_pii(monkeypatch, capsys):
-    monkeypatch.setenv("CONVERTKIT_API_SECRET", "segredo-instrumentacao")
-    monkeypatch.setenv("TAG_LEAD_ID", "tag-instrumentacao")
-    monkeypatch.setattr(
-        main.requests,
-        "post",
-        lambda *args, **kwargs: FakeResponse(
-            200, {"subscription": {"subscriber": {"id": 789}}}
-        ),
-    )
-    monkeypatch.setattr(main.requests, "put", lambda *a, **k: FakeResponse(200))
-
-    main.adicionar_lead_convertkit("instrumentacao@example.com", "Lucas Gomes")
-    logs = capsys.readouterr().out
-
-    for esperado in (
-        "stage=kit_helper_entered first_name_present=True",
-        "stage=kit_subscribe_completed success=True",
-        "stage=subscriber_id_valid value=True",
-        "stage=first_name_put_attempted",
-        "stage=first_name_put_completed success=True",
-    ):
-        assert esperado in logs
-    for pii in (
-        "instrumentacao@example.com",
-        "Lucas",
-        "Gomes",
-        "789",
-        "segredo-instrumentacao",
-        "tag-instrumentacao",
-    ):
-        assert pii not in logs
-
-
 @pytest.mark.parametrize("nome", [None, "", "   ", {"nome": "Lucas"}])
 def test_convertkit_lead_nome_ausente_vazio_ou_invalido_preserva_payload(
     monkeypatch, nome

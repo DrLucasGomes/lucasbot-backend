@@ -77,18 +77,7 @@ def test_wrapper_com_nome_normaliza_e_encaminha_first_name(
         "convertkit_lead_agendado": True,
         "resposta_supabase": [{"ok": True}],
     }
-    logs = capsys.readouterr().out
-    assert logs.splitlines() == [
-        "stage=manychat_wrapper_entered",
-        "stage=name_field_detected value=True",
-        "stage=first_name_normalized value=True",
-        "stage=kit_task_scheduled first_name_present=True",
-        "stage=kit_background_callable_entered",
-        "stage=kit_threadpool_dispatch_started",
-        "stage=kit_threadpool_dispatch_completed success=True",
-    ]
-    for pii in ("abc123", "lead@example.com", "Lucas", "Felipe", "Gomes"):
-        assert pii not in logs
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize("nome", [None, "", "   ", "{{nome}}"])
@@ -112,28 +101,6 @@ def test_wrapper_sem_nome_valido_preserva_chamada_apenas_com_email(
 
     resposta = client.post("/webhook", json=payload)
 
-    assert chamadas_kit == [("lead@example.com", "")]
+    assert chamadas_kit == [("lead@example.com",)]
     assert resposta.json()["status"] == "sucesso"
     assert resposta.json()["convertkit_lead_agendado"] is True
-
-
-def test_wrapper_diagnostico_registra_falha_e_relanca(monkeypatch, capsys):
-    def falhar(email, first_name):
-        raise RuntimeError("falha de teste")
-
-    monkeypatch.setattr(main, "adicionar_lead_convertkit", falhar)
-
-    with pytest.raises(RuntimeError, match="falha de teste"):
-        import asyncio
-
-        asyncio.run(
-            tracking_safe_webhook.diagnosticar_background_kit(
-                "lead@example.com", "Lucas"
-            )
-        )
-
-    assert capsys.readouterr().out.splitlines() == [
-        "stage=kit_background_callable_entered",
-        "stage=kit_threadpool_dispatch_started",
-        "stage=kit_threadpool_dispatch_completed success=False",
-    ]
