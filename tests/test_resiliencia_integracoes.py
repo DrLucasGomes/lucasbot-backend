@@ -57,7 +57,7 @@ def test_convertkit_lead_email_invalido_nao_faz_chamada(monkeypatch):
     assert chamadas == []
 
 
-def test_convertkit_lead_com_nome_atualiza_subscriber_via_put(monkeypatch):
+def test_convertkit_lead_com_nome_atualiza_subscriber_via_put(monkeypatch, capsys):
     posts = []
     puts = []
     monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
@@ -88,6 +88,21 @@ def test_convertkit_lead_com_nome_atualiza_subscriber_via_put(monkeypatch):
         )
     ]
     assert "email" not in puts[0][1]["json"]
+    logs = capsys.readouterr().out
+    for stage in (
+        "stage=manychat_background_entered first_name_present=True",
+        "stage=manychat_subscriber_id_valid value=True",
+        "stage=manychat_first_name_put_attempted value=True",
+        "stage=manychat_first_name_put_success value=True",
+    ):
+        assert stage in logs
+    for sensivel in (
+        "lead@example.com",
+        "Lucas",
+        "789",
+        "secret",
+    ):
+        assert sensivel not in logs
 
 
 @pytest.mark.parametrize("nome", [None, "", "   ", {"nome": "Lucas"}])
@@ -127,7 +142,7 @@ def test_convertkit_lead_chamada_antiga_sem_nome_continua_funcionando(monkeypatc
 
 @pytest.mark.parametrize("json_data", [{}, ValueError("json invalido")])
 def test_convertkit_lead_sem_subscriber_id_preserva_sucesso_e_nao_faz_put(
-    monkeypatch, json_data
+    monkeypatch, json_data, capsys
 ):
     puts = []
     monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
@@ -140,6 +155,12 @@ def test_convertkit_lead_sem_subscriber_id_preserva_sucesso_e_nao_faz_put(
     main.adicionar_lead_convertkit("lead@example.com", "Lucas Gomes")
 
     assert puts == []
+    logs = capsys.readouterr().out
+    assert "stage=manychat_subscriber_id_valid value=False" in logs
+    assert "stage=manychat_first_name_put_attempted value=False" in logs
+    assert "stage=manychat_first_name_put_success" not in logs
+    for sensivel in ("lead@example.com", "Lucas"):
+        assert sensivel not in logs
 
 
 @pytest.mark.parametrize("status_code", [400, 500])

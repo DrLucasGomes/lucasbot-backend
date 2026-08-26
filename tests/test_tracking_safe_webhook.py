@@ -77,12 +77,20 @@ def test_wrapper_com_nome_normaliza_e_encaminha_first_name(
         "convertkit_lead_agendado": True,
         "resposta_supabase": [{"ok": True}],
     }
-    assert capsys.readouterr().out == ""
+    logs = capsys.readouterr().out
+    assert "stage=manychat_first_name_present value=True" in logs
+    for sensivel in (
+        "Lucas",
+        "lead@example.com",
+        "abc123",
+        "Lucas Felipe Gomes",
+    ):
+        assert sensivel not in logs
 
 
 @pytest.mark.parametrize("nome", [None, "", "   ", "{{nome}}"])
 def test_wrapper_sem_nome_valido_preserva_chamada_apenas_com_email(
-    monkeypatch, client, nome
+    monkeypatch, client, nome, capsys
 ):
     chamadas_kit = []
     persistido = {}
@@ -104,3 +112,7 @@ def test_wrapper_sem_nome_valido_preserva_chamada_apenas_com_email(
     assert chamadas_kit == [("lead@example.com",)]
     assert resposta.json()["status"] == "sucesso"
     assert resposta.json()["convertkit_lead_agendado"] is True
+    logs = capsys.readouterr().out
+    assert "stage=manychat_first_name_present value=False" in logs
+    assert "lead@example.com" not in logs
+    assert "abc123" not in logs

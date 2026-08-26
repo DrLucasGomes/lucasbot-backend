@@ -76,6 +76,10 @@ async def webhook_protegido(request: Request, background_tasks: BackgroundTasks)
         sucesso = response.status_code in (200, 201, 204)
         email_lead = dados_limpos.get("email")
         first_name = primeiro_nome(dados_limpos.get("nome"))
+        print(
+            f"stage=manychat_first_name_present value={bool(first_name)}",
+            flush=True,
+        )
 
         if sucesso and main.valor_valido(email_lead):
             if first_name:
