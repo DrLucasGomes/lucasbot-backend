@@ -296,11 +296,6 @@ def adicionar_lead_convertkit(email: str, first_name: str = ""):
     Adiciona lead comum vindo do ManyChat na tag TAG_LEAD_ID do ConvertKit/Kit.
     Esta função é chamada pelo /webhook quando o ManyChat envia um email.
     """
-    print(
-        "stage=manychat_background_entered "
-        f"first_name_present={bool(primeiro_nome(first_name))}",
-        flush=True,
-    )
     if not valor_valido(email):
         print("[ConvertKit Lead] Email invalido ou vazio")
         return
@@ -335,24 +330,10 @@ def adicionar_lead_convertkit(email: str, first_name: str = ""):
             f"subscriber_id_present={subscriber_id_present} "
             f"first_name_present={first_name_present}"
         )
-        subscriber_id = None
         if r.status_code in (200, 201, 204) and first_name:
             subscriber_id = extrair_subscriber_id(r)
-        print(
-            f"stage=manychat_subscriber_id_valid value={subscriber_id is not None}",
-            flush=True,
-        )
-        put_attempted = subscriber_id is not None
-        print(
-            f"stage=manychat_first_name_put_attempted value={put_attempted}",
-            flush=True,
-        )
-        if put_attempted:
-            put_success = atualizar_first_name_kit(subscriber_id, first_name)
-            print(
-                f"stage=manychat_first_name_put_success value={put_success}",
-                flush=True,
-            )
+            if subscriber_id is not None:
+                atualizar_first_name_kit(subscriber_id, first_name)
     except Exception as e:
         print(f"[ConvertKit Lead] Subscribe falhou: {type(e).__name__}")
 

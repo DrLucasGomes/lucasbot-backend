@@ -28,8 +28,6 @@ KIWIFY_PENDING_STATUSES = frozenset({"pending", "waiting_payment"})
 KIWIFY_API_TIMEOUT_SECONDS = 5
 PIX_JOB_STALE_MINUTES = 5
 PIX_JOB_RECONCILE_LIMIT = 5
-RUNTIME_GIT_MARKER = "91862b15"
-SUPABASE_PROJECT_REF = URL.removeprefix("https://").split(".", 1)[0]
 
 _kiwify_oauth_lock = threading.Lock()
 _kiwify_oauth_cache = {"access_token": "", "expires_at": 0.0}
@@ -381,8 +379,6 @@ def _alterar_tag_kit(
     email: str,
     acao: str,
     first_name: str = "",
-    *,
-    resultado_e2e: dict | None = None,
 ) -> bool:
     tag_id = os.getenv("TAG_PIX_ID")
     if not tag_id or not email:
@@ -414,22 +410,10 @@ def _alterar_tag_kit(
             f"first_name_present={first_name_present}"
         )
     tag_success = resposta.status_code in (200, 201, 204)
-    if resultado_e2e is not None:
-        resultado_e2e["tag_subscribe_success"] = tag_success
     if acao == "subscribe" and tag_success and first_name:
         subscriber_id = extrair_subscriber_id(resposta)
-        if resultado_e2e is not None:
-            resultado_e2e["subscriber_id_valid"] = subscriber_id is not None
-        print(
-            f"pix_subscriber_id_valid={subscriber_id is not None}",
-            flush=True,
-        )
         if subscriber_id is not None:
-            put_success = atualizar_first_name_kit(
-                subscriber_id, first_name, diagnostico_pix=True
-            )
-            if resultado_e2e is not None:
-                resultado_e2e["first_name_put_success"] = put_success
+            atualizar_first_name_kit(subscriber_id, first_name)
     return tag_success
 
 
@@ -507,7 +491,6 @@ def processar_pix_criado(dados):
             return reconciliar_cancelamento(order_id, email)
 
         try:
-            print(f"pix_first_name_present={bool(first_name)}", flush=True)
             if first_name:
                 sucesso = _alterar_tag_kit(email, "subscribe", first_name)
             else:
@@ -635,111 +618,6 @@ def _autorizar_reconciliacao(request: Request) -> None:
     recebido = authorization[len(prefixo) :] if authorization.startswith(prefixo) else ""
     if not segredo or not recebido or not hmac.compare_digest(recebido, segredo):
         raise HTTPException(status_code=401, detail="nao autorizado")
-
-
-def _pix_route_wrapper_active(app) -> bool:
-    visitados = set()
-
-    def endpoint_kiwify(router_atual):
-        if router_atual is None or id(router_atual) in visitados:
-            return None
-        visitados.add(id(router_atual))
-        for rota in getattr(router_atual, "routes", []):
-            endpoint = getattr(rota, "endpoint", None)
-            if (
-                getattr(rota, "path", None) == "/kiwify"
-                and "POST" in (getattr(rota, "methods", set()) or set())
-            ):
-                return endpoint
-            endpoint_incluido = endpoint_kiwify(
-                getattr(rota, "original_router", None)
-            )
-            if endpoint_incluido is not None:
-                return endpoint_incluido
-        return None
-
-    return endpoint_kiwify(getattr(app, "router", None)) is webhook_kiwify_com_pix
-
-
-def _disponibilidade_rpc_pix() -> tuple[bool, bool]:
-    try:
-        resposta = requests.get(
-            f"{URL}/rest/v1/",
-            headers={
-                **obter_headers_supabase(),
-                "Accept": "application/openapi+json",
-            },
-            timeout=3,
-        )
-        if resposta.status_code != 200:
-            return False, False
-        schema = resposta.json()
-        paths = schema.get("paths", {}) if isinstance(schema, dict) else {}
-        if not isinstance(paths, dict):
-            return False, False
-    except Exception:
-        return False, False
-
-    job_disponivel = (
-        f"/{PIX_JOB_TABLE}" in paths
-        and "/rpc/recovery_pix_job_enqueue" in paths
-    )
-    ledger_disponivel = (
-        f"/{PIX_TABLE}" in paths
-        and "/rpc/recovery_pix_acquire" in paths
-    )
-    return job_disponivel, ledger_disponivel
-
-
-@router.get("/internal/e2e/runtime-pix-state")
-async def runtime_pix_state(request: Request):
-    _autorizar_reconciliacao(request)
-    job_rpc_available, ledger_rpc_available = _disponibilidade_rpc_pix()
-    return {
-        "git_marker": RUNTIME_GIT_MARKER,
-        "pix_route_wrapper_active": _pix_route_wrapper_active(request.app),
-        "supabase_project_ref": SUPABASE_PROJECT_REF,
-        "job_rpc_available": job_rpc_available,
-        "ledger_rpc_available": ledger_rpc_available,
-    }
-
-
-@router.post("/internal/e2e/pix-first-name/{order_id}")
-async def pix_first_name_e2e(order_id: str, request: Request):
-    _autorizar_reconciliacao(request)
-    resultado = {
-        "sale_confirmed": False,
-        "first_name_present": False,
-        "tag_subscribe_success": False,
-        "subscriber_id_valid": False,
-        "first_name_put_success": False,
-    }
-
-    venda = confirmar_venda_kiwify(
-        order_id,
-        statuses_aceitos=KIWIFY_PENDING_STATUSES,
-        payment_method_esperado="pix",
-    )
-    resultado["sale_confirmed"] = bool(venda)
-    if not venda:
-        return resultado
-
-    email = _texto(venda.get("email"))
-    first_name = _primeiro_nome(venda.get("first_name"))
-    resultado["first_name_present"] = bool(first_name)
-    if not email:
-        return resultado
-
-    try:
-        _alterar_tag_kit(
-            email,
-            "subscribe",
-            first_name,
-            resultado_e2e=resultado,
-        )
-    except Exception:
-        pass
-    return resultado
 
 
 @router.post("/internal/recovery-pix/reconcile")
