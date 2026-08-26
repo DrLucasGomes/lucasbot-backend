@@ -377,7 +377,13 @@ def buscar_ledger(order_id: str) -> dict:
     return {}
 
 
-def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
+def _alterar_tag_kit(
+    email: str,
+    acao: str,
+    first_name: str = "",
+    *,
+    resultado_e2e: dict | None = None,
+) -> bool:
     tag_id = os.getenv("TAG_PIX_ID")
     if not tag_id or not email:
         return False
@@ -408,16 +414,22 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
             f"first_name_present={first_name_present}"
         )
     tag_success = resposta.status_code in (200, 201, 204)
+    if resultado_e2e is not None:
+        resultado_e2e["tag_subscribe_success"] = tag_success
     if acao == "subscribe" and tag_success and first_name:
         subscriber_id = extrair_subscriber_id(resposta)
+        if resultado_e2e is not None:
+            resultado_e2e["subscriber_id_valid"] = subscriber_id is not None
         print(
             f"pix_subscriber_id_valid={subscriber_id is not None}",
             flush=True,
         )
         if subscriber_id is not None:
-            atualizar_first_name_kit(
+            put_success = atualizar_first_name_kit(
                 subscriber_id, first_name, diagnostico_pix=True
             )
+            if resultado_e2e is not None:
+                resultado_e2e["first_name_put_success"] = put_success
     return tag_success
 
 
@@ -690,6 +702,44 @@ async def runtime_pix_state(request: Request):
         "job_rpc_available": job_rpc_available,
         "ledger_rpc_available": ledger_rpc_available,
     }
+
+
+@router.post("/internal/e2e/pix-first-name/{order_id}")
+async def pix_first_name_e2e(order_id: str, request: Request):
+    _autorizar_reconciliacao(request)
+    resultado = {
+        "sale_confirmed": False,
+        "first_name_present": False,
+        "tag_subscribe_success": False,
+        "subscriber_id_valid": False,
+        "first_name_put_success": False,
+    }
+
+    venda = confirmar_venda_kiwify(
+        order_id,
+        statuses_aceitos=KIWIFY_PENDING_STATUSES,
+        payment_method_esperado="pix",
+    )
+    resultado["sale_confirmed"] = bool(venda)
+    if not venda:
+        return resultado
+
+    email = _texto(venda.get("email"))
+    first_name = _primeiro_nome(venda.get("first_name"))
+    resultado["first_name_present"] = bool(first_name)
+    if not email:
+        return resultado
+
+    try:
+        _alterar_tag_kit(
+            email,
+            "subscribe",
+            first_name,
+            resultado_e2e=resultado,
+        )
+    except Exception:
+        pass
+    return resultado
 
 
 @router.post("/internal/recovery-pix/reconcile")
