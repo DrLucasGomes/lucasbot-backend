@@ -7,11 +7,31 @@ pode sobrescrever esses campos (ex.: WhatsApp Direto / Fallback_Entrada).
 
 import requests
 from fastapi import APIRouter, BackgroundTasks, Request
+from starlette.concurrency import run_in_threadpool
 
 import main
 from kit_utils import primeiro_nome
 
 router = APIRouter()
+
+
+async def diagnosticar_background_kit(email_lead, first_name):
+    print("stage=kit_background_callable_entered", flush=True)
+    try:
+        print("stage=kit_threadpool_dispatch_started", flush=True)
+        await run_in_threadpool(
+            main.adicionar_lead_convertkit, email_lead, first_name
+        )
+        print(
+            "stage=kit_threadpool_dispatch_completed success=True",
+            flush=True,
+        )
+    except Exception:
+        print(
+            "stage=kit_threadpool_dispatch_completed success=False",
+            flush=True,
+        )
+        raise
 
 
 def buscar_atribuicao_existente(manychat_id: str) -> dict:
@@ -90,12 +110,9 @@ async def webhook_protegido(request: Request, background_tasks: BackgroundTasks)
                 "stage=kit_task_scheduled "
                 f"first_name_present={bool(first_name)}"
             )
-            if first_name:
-                background_tasks.add_task(
-                    main.adicionar_lead_convertkit, email_lead, first_name
-                )
-            else:
-                background_tasks.add_task(main.adicionar_lead_convertkit, email_lead)
+            background_tasks.add_task(
+                diagnosticar_background_kit, email_lead, first_name
+            )
 
         return {
             "status": "sucesso" if sucesso else "erro_supabase",
