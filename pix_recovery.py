@@ -28,6 +28,8 @@ KIWIFY_PENDING_STATUSES = frozenset({"pending", "waiting_payment"})
 KIWIFY_API_TIMEOUT_SECONDS = 5
 PIX_JOB_STALE_MINUTES = 5
 PIX_JOB_RECONCILE_LIMIT = 5
+RUNTIME_GIT_MARKER = "91862b15"
+SUPABASE_PROJECT_REF = URL.removeprefix("https://").split(".", 1)[0]
 
 _kiwify_oauth_lock = threading.Lock()
 _kiwify_oauth_cache = {"access_token": "", "expires_at": 0.0}
@@ -610,6 +612,73 @@ def _autorizar_reconciliacao(request: Request) -> None:
     recebido = authorization[len(prefixo) :] if authorization.startswith(prefixo) else ""
     if not segredo or not recebido or not hmac.compare_digest(recebido, segredo):
         raise HTTPException(status_code=401, detail="nao autorizado")
+
+
+def _pix_route_wrapper_active(app) -> bool:
+    visitados = set()
+
+    def endpoint_kiwify(router_atual):
+        if router_atual is None or id(router_atual) in visitados:
+            return None
+        visitados.add(id(router_atual))
+        for rota in getattr(router_atual, "routes", []):
+            endpoint = getattr(rota, "endpoint", None)
+            if (
+                getattr(rota, "path", None) == "/kiwify"
+                and "POST" in (getattr(rota, "methods", set()) or set())
+            ):
+                return endpoint
+            endpoint_incluido = endpoint_kiwify(
+                getattr(rota, "original_router", None)
+            )
+            if endpoint_incluido is not None:
+                return endpoint_incluido
+        return None
+
+    return endpoint_kiwify(getattr(app, "router", None)) is webhook_kiwify_com_pix
+
+
+def _disponibilidade_rpc_pix() -> tuple[bool, bool]:
+    try:
+        resposta = requests.get(
+            f"{URL}/rest/v1/",
+            headers={
+                **obter_headers_supabase(),
+                "Accept": "application/openapi+json",
+            },
+            timeout=3,
+        )
+        if resposta.status_code != 200:
+            return False, False
+        schema = resposta.json()
+        paths = schema.get("paths", {}) if isinstance(schema, dict) else {}
+        if not isinstance(paths, dict):
+            return False, False
+    except Exception:
+        return False, False
+
+    job_disponivel = (
+        f"/{PIX_JOB_TABLE}" in paths
+        and "/rpc/recovery_pix_job_enqueue" in paths
+    )
+    ledger_disponivel = (
+        f"/{PIX_TABLE}" in paths
+        and "/rpc/recovery_pix_acquire" in paths
+    )
+    return job_disponivel, ledger_disponivel
+
+
+@router.get("/internal/e2e/runtime-pix-state")
+async def runtime_pix_state(request: Request):
+    _autorizar_reconciliacao(request)
+    job_rpc_available, ledger_rpc_available = _disponibilidade_rpc_pix()
+    return {
+        "git_marker": RUNTIME_GIT_MARKER,
+        "pix_route_wrapper_active": _pix_route_wrapper_active(request.app),
+        "supabase_project_ref": SUPABASE_PROJECT_REF,
+        "job_rpc_available": job_rpc_available,
+        "ledger_rpc_available": ledger_rpc_available,
+    }
 
 
 @router.post("/internal/recovery-pix/reconcile")
