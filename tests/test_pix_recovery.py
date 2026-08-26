@@ -978,6 +978,103 @@ def confirmar_real(
     )
 
 
+@pytest.mark.parametrize("customer_key", ["customer", "Customer"])
+@pytest.mark.parametrize("name_key", ["first_name", "name", "full_name"])
+def test_venda_kiwify_aceita_shapes_de_nome(
+    monkeypatch, customer_key, name_key
+):
+    venda = venda_api(customer_name=None)
+    venda.pop("customer")
+    venda[customer_key] = {
+        "email": "oficial@example.com",
+        name_key: "Maria de Souza",
+    }
+    instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda))
+
+    confirmado = confirmar_real(
+        venda["id"], {"waiting_payment"}, payment_method_esperado="pix"
+    )
+
+    assert confirmado["email"] == "oficial@example.com"
+    assert confirmado["first_name"] == "Maria"
+
+
+def test_venda_kiwify_prioriza_first_name_sobre_name_e_full_name(monkeypatch):
+    venda = venda_api(customer_name=None)
+    venda["customer"] = {
+        "email": "oficial@example.com",
+        "first_name": "Maria",
+        "name": "Joana da Silva",
+        "full_name": "Carla de Souza",
+    }
+    instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda))
+
+    confirmado = confirmar_real(
+        venda["id"], {"waiting_payment"}, payment_method_esperado="pix"
+    )
+
+    assert confirmado["first_name"] == "Maria"
+
+
+@pytest.mark.parametrize("nome", [None, "", "   ", {"name": "Maria"}])
+def test_venda_kiwify_nome_ausente_vazio_ou_invalido(monkeypatch, nome):
+    venda = venda_api(customer_name=None)
+    if nome is not None:
+        venda["customer"]["first_name"] = nome
+    instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda))
+
+    confirmado = confirmar_real(
+        venda["id"], {"waiting_payment"}, payment_method_esperado="pix"
+    )
+
+    assert confirmado["first_name"] == ""
+
+
+def test_venda_kiwify_sem_email_continua_invalidando_fluxo(monkeypatch):
+    venda = venda_api()
+    venda["customer"].pop("email")
+    instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda))
+    monkeypatch.setattr(pix_recovery, "confirmar_venda_kiwify", confirmar_real)
+    efeitos = []
+    monkeypatch.setattr(
+        pix_recovery,
+        "adquirir_processamento",
+        lambda *args: efeitos.append("ledger") or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "_alterar_tag_kit",
+        lambda *args: efeitos.append("kit") or True,
+    )
+
+    assert pix_recovery.processar_pix_criado(payload_pix_plano()) is False
+    assert efeitos == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"id": "outra-ordem"},
+        {"status": "paid"},
+        {"payment_method": "credit_card"},
+    ],
+)
+def test_venda_kiwify_continua_rejeitando_identidade_status_e_metodo(
+    monkeypatch, overrides
+):
+    venda = venda_api()
+    venda.update(overrides)
+    instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda))
+
+    confirmado = confirmar_real(
+        "46bc33eb-6e53-4b4d-a8f7-72757a84b4ef",
+        {"waiting_payment"},
+        payment_method_esperado="pix",
+    )
+
+    assert confirmado == {}
+
+
 def test_venda_kiwify_valida_libera_pix_created(monkeypatch):
     instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda_api()))
     monkeypatch.setattr(pix_recovery, "confirmar_venda_kiwify", confirmar_real)
@@ -1011,6 +1108,41 @@ def test_venda_confirmada_propaga_primeiro_nome_ao_subscribe(monkeypatch):
 
     assert pix_recovery.processar_pix_criado(payload_pix_plano()) is True
     assert enviados == [("oficial@example.com", "subscribe", "Maria")]
+
+
+def test_venda_customer_first_name_dispara_put_no_fluxo_pix(monkeypatch):
+    venda = venda_api(customer_name=None)
+    venda["customer"]["first_name"] = "Maria de Souza"
+    instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda))
+    monkeypatch.setattr(pix_recovery, "confirmar_venda_kiwify", confirmar_real)
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret-value")
+    monkeypatch.setattr(pix_recovery, "adquirir_processamento", lambda *args: True)
+    monkeypatch.setattr(pix_recovery, "transicionar", lambda *args: True)
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            200, {"subscription": {"subscriber": {"id": 123}}}
+        ),
+    )
+    puts = []
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "put",
+        lambda url, **kwargs: puts.append((url, kwargs)) or FakeResponse(200),
+    )
+
+    assert pix_recovery.processar_pix_criado(payload_pix_plano()) is True
+    assert puts == [
+        (
+            "https://api.convertkit.com/v3/subscribers/123",
+            {
+                "json": {"api_secret": "secret-value", "first_name": "Maria"},
+                "timeout": 5,
+            },
+        )
+    ]
 
 
 def test_venda_confirmada_sem_nome_preserva_subscribe_atual(monkeypatch):

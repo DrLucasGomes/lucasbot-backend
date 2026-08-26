@@ -154,11 +154,15 @@ def confirmar_venda_kiwify(
     identity_ok = _texto(venda.get("id")) == order_id
     status = _texto(venda.get("status")).lower()
     payment_method = _texto(venda.get("payment_method")).lower()
-    customer = venda.get("customer")
+    customer = venda.get("customer") or venda.get("Customer")
     if not isinstance(customer, dict):
         customer = {}
     email = _texto(customer.get("email"))
-    first_name = _primeiro_nome(customer.get("name"))
+    first_name = (
+        _primeiro_nome(customer.get("first_name"))
+        or _primeiro_nome(customer.get("name"))
+        or _primeiro_nome(customer.get("full_name"))
+    )
     if not identity_ok:
         return {}
 
