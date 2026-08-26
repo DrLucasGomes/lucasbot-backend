@@ -1110,7 +1110,7 @@ def test_venda_confirmada_propaga_primeiro_nome_ao_subscribe(monkeypatch):
     assert enviados == [("oficial@example.com", "subscribe", "Maria")]
 
 
-def test_venda_customer_first_name_dispara_put_no_fluxo_pix(monkeypatch):
+def test_venda_customer_first_name_dispara_put_no_fluxo_pix(monkeypatch, capsys):
     venda = venda_api(customer_name=None)
     venda["customer"]["first_name"] = "Maria de Souza"
     instalar_consulta_kiwify(monkeypatch, FakeResponse(200, venda))
@@ -1143,6 +1143,49 @@ def test_venda_customer_first_name_dispara_put_no_fluxo_pix(monkeypatch):
             },
         )
     ]
+    logs = capsys.readouterr().out
+    for esperado in (
+        "pix_first_name_present=True",
+        "pix_subscriber_id_valid=True",
+        "pix_first_name_put_attempted=True",
+        "pix_first_name_put_success=True",
+    ):
+        assert esperado in logs
+    for sensivel in (
+        "Maria",
+        "oficial@example.com",
+        "123",
+        "secret-value",
+        venda["id"],
+    ):
+        assert sensivel not in logs
+
+
+def test_instrumentacao_pix_registra_falha_do_put_sem_pii(monkeypatch, capsys):
+    monkeypatch.setenv("TAG_PIX_ID", "tag-pix")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "segredo-diagnostico")
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda *args, **kwargs: FakeResponse(
+            200, {"subscription": {"subscriber": {"id": 987654}}}
+        ),
+    )
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "put",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("email@pii")),
+    )
+
+    assert pix_recovery._alterar_tag_kit(
+        "email@pii", "subscribe", "Maria"
+    ) is True
+    logs = capsys.readouterr().out
+    assert "pix_subscriber_id_valid=True" in logs
+    assert "pix_first_name_put_attempted=True" in logs
+    assert "pix_first_name_put_success=False" in logs
+    for sensivel in ("Maria", "email@pii", "987654", "segredo-diagnostico"):
+        assert sensivel not in logs
 
 
 def test_venda_confirmada_sem_nome_preserva_subscribe_atual(monkeypatch):

@@ -410,8 +410,14 @@ def _alterar_tag_kit(email: str, acao: str, first_name: str = "") -> bool:
     tag_success = resposta.status_code in (200, 201, 204)
     if acao == "subscribe" and tag_success and first_name:
         subscriber_id = extrair_subscriber_id(resposta)
+        print(
+            f"pix_subscriber_id_valid={subscriber_id is not None}",
+            flush=True,
+        )
         if subscriber_id is not None:
-            atualizar_first_name_kit(subscriber_id, first_name)
+            atualizar_first_name_kit(
+                subscriber_id, first_name, diagnostico_pix=True
+            )
     return tag_success
 
 
@@ -489,6 +495,7 @@ def processar_pix_criado(dados):
             return reconciliar_cancelamento(order_id, email)
 
         try:
+            print(f"pix_first_name_present={bool(first_name)}", flush=True)
             if first_name:
                 sucesso = _alterar_tag_kit(email, "subscribe", first_name)
             else:

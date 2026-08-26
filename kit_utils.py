@@ -59,7 +59,9 @@ def extrair_subscriber_id(resposta):
     return _subscriber_id_valido(subscriber_id)
 
 
-def atualizar_first_name_kit(subscriber_id, first_name) -> bool:
+def atualizar_first_name_kit(
+    subscriber_id, first_name, *, diagnostico_pix: bool = False
+) -> bool:
     subscriber_id = _subscriber_id_valido(subscriber_id)
     first_name = primeiro_nome(first_name)
     api_secret = os.getenv("CONVERTKIT_API_SECRET")
@@ -67,18 +69,24 @@ def atualizar_first_name_kit(subscriber_id, first_name) -> bool:
         return False
 
     try:
+        if diagnostico_pix:
+            print("pix_first_name_put_attempted=True", flush=True)
         resposta = requests.put(
             f"{KIT_BASE_URL}/subscribers/{subscriber_id}",
             json={"api_secret": api_secret, "first_name": first_name},
             timeout=KIT_TIMEOUT_SECONDS,
         )
         sucesso = resposta.status_code in (200, 201, 204)
+        if diagnostico_pix:
+            print(f"pix_first_name_put_success={sucesso}", flush=True)
         print(
             "[Kit Subscriber] operation=update_first_name "
             f"status_http={resposta.status_code} success={sucesso}"
         )
         return sucesso
     except Exception as exc:
+        if diagnostico_pix:
+            print("pix_first_name_put_success=False", flush=True)
         print(
             "[Kit Subscriber] operation=update_first_name "
             f"failed={type(exc).__name__}"
