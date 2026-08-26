@@ -3,7 +3,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 import requests
@@ -53,6 +53,19 @@ def _ordem(dados):
 
 def _texto(valor):
     return str(valor or "").strip()
+
+
+def _normalizar_boleto_link(valor) -> str:
+    texto = _texto(valor)
+    if not texto:
+        return ""
+    try:
+        parsed = urlparse(texto)
+    except Exception:
+        return ""
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        return ""
+    return texto
 
 
 def _obter_oauth_token_kiwify() -> str:
@@ -162,6 +175,9 @@ def confirmar_venda_kiwify(
         or _primeiro_nome(customer.get("name"))
         or _primeiro_nome(customer.get("full_name"))
     )
+    boleto_url = _normalizar_boleto_link(
+        venda.get("boleto_url") or venda.get("boleto_URL")
+    )
     if not identity_ok:
         return {}
 
@@ -172,13 +188,16 @@ def confirmar_venda_kiwify(
     if payment_method_esperado and payment_method != _texto(payment_method_esperado).lower():
         return {}
 
-    return {
+    resultado = {
         "id": order_id,
         "status": status,
         "payment_method": payment_method,
         "email": email,
         "first_name": first_name,
     }
+    if payment_method == "boleto" and boleto_url:
+        resultado["boleto_url"] = boleto_url
+    return resultado
 
 
 def _evento_pix_criado(dados) -> bool:
@@ -487,7 +506,12 @@ def _alterar_tag_kit(
     return tag_success
 
 
-def _alterar_tag_boleto_kit(email: str, acao: str, first_name: str = "") -> bool:
+def _alterar_tag_boleto_kit(
+    email: str,
+    acao: str,
+    first_name: str = "",
+    boleto_link: str = "",
+) -> bool:
     tag_id = _texto(os.getenv("TAG_BOLETO_ID"))
     api_secret = _texto(os.getenv("CONVERTKIT_API_SECRET"))
     if not tag_id or not email or not api_secret or acao not in {"subscribe", "unsubscribe"}:
@@ -497,8 +521,11 @@ def _alterar_tag_boleto_kit(email: str, acao: str, first_name: str = "") -> bool
     first_name_normalizado = (
         _primeiro_nome(first_name) if valor_valido(first_name) else ""
     )
+    link_normalizado = _normalizar_boleto_link(boleto_link)
     if acao == "subscribe" and first_name_normalizado:
         payload["first_name"] = first_name_normalizado
+    if acao == "subscribe" and link_normalizado:
+        payload["fields"] = {"boleto_link": link_normalizado}
     resposta = requests.post(
         f"{KIT_BASE_URL}/tags/{tag_id}/{acao}", json=payload, timeout=5
     )
@@ -595,7 +622,6 @@ def processar_pix_criado(dados):
     if not email:
         return False
     first_name = _primeiro_nome(venda.get("first_name"))
-
     attempt_token = str(uuid4())
 
     try:
@@ -663,7 +689,8 @@ def processar_boleto_criado(dados, expires_at_override: str = ""):
             return True
         return False
     email = _texto(venda.get("email"))
-    if not email:
+    boleto_link = _normalizar_boleto_link(venda.get("boleto_url"))
+    if not email or not boleto_link:
         return False
     first_name = _primeiro_nome(venda.get("first_name"))
     attempt_token = str(uuid4())
@@ -679,7 +706,9 @@ def processar_boleto_criado(dados, expires_at_override: str = ""):
         if not transicionar(order_id, attempt_token, "processing", "subscribing"):
             return reconciliar_cancelamento_boleto(order_id, email)
         try:
-            sucesso = _alterar_tag_boleto_kit(email, "subscribe", first_name)
+            sucesso = _alterar_tag_boleto_kit(
+                email, "subscribe", first_name, boleto_link
+            )
         except Exception as exc:
             print(f"[Boleto Recovery] Resultado ambiguo do subscribe: {type(exc).__name__}")
             if compensar_subscribe_boleto_concorrente(order_id, email, attempt_token):
