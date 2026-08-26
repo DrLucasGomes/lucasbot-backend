@@ -4,8 +4,6 @@ import os
 from urllib.parse import urlparse, parse_qs
 
 from kit_utils import (
-    atualizar_first_name_kit,
-    extrair_subscriber_id,
     metadados_resposta_subscribe,
     primeiro_nome,
 )
@@ -318,6 +316,8 @@ def adicionar_lead_convertkit(email: str, first_name: str = ""):
         "email": str(email).strip()
     }
     first_name = primeiro_nome(first_name)
+    if valor_valido(first_name):
+        payload["first_name"] = first_name
 
     try:
         r = requests.post(url, json=payload, timeout=10)
@@ -330,10 +330,6 @@ def adicionar_lead_convertkit(email: str, first_name: str = ""):
             f"subscriber_id_present={subscriber_id_present} "
             f"first_name_present={first_name_present}"
         )
-        if r.status_code in (200, 201, 204) and first_name:
-            subscriber_id = extrair_subscriber_id(r)
-            if subscriber_id is not None:
-                atualizar_first_name_kit(subscriber_id, first_name)
     except Exception as e:
         print(f"[ConvertKit Lead] Subscribe falhou: {type(e).__name__}")
 
