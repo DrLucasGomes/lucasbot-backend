@@ -15,7 +15,6 @@ from kit_utils import (
     primeiro_nome as _primeiro_nome,
 )
 from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
-from pix_attribution import registrar_evento_atribuicao_pix
 
 
 router = APIRouter(tags=["kiwify-pix-recovery"])
@@ -32,17 +31,6 @@ PIX_JOB_RECONCILE_LIMIT = 5
 
 _kiwify_oauth_lock = threading.Lock()
 _kiwify_oauth_cache = {"access_token": "", "expires_at": 0.0}
-
-
-def _registrar_atribuicao_fail_open(order_id: str, event_name: str) -> None:
-    try:
-        registrar_evento_atribuicao_pix(order_id, event_name)
-    except Exception as exc:
-        print(
-            "[PIX Attribution] "
-            f"event={event_name} unexpected_failure error={type(exc).__name__}"
-        )
-
 
 def _ordem(dados):
     if not isinstance(dados, dict):
@@ -496,7 +484,6 @@ def processar_pix_criado(dados):
         if not adquirir_processamento(order_id, email, attempt_token):
             ledger = buscar_ledger(order_id)
             if _texto(ledger.get("status")).lower() == "completed":
-                _registrar_atribuicao_fail_open(order_id, "recovery_entered")
                 return True
             return reconciliar_cancelamento(order_id, email)
 
@@ -523,7 +510,6 @@ def processar_pix_criado(dados):
 
         if not transicionar(order_id, attempt_token, "subscribing", "completed"):
             return compensar_subscribe_concorrente(order_id, email, attempt_token)
-        _registrar_atribuicao_fail_open(order_id, "recovery_entered")
         return True
 
     except Exception as exc:
@@ -558,9 +544,6 @@ def cancelar_pix_por_pagamento(dados):
     except Exception as exc:
         print(f"[PIX Recovery] Falha ao cancelar recovery: {type(exc).__name__}")
         return False
-    finally:
-        # Este bloco so e alcancado depois da validacao oficial de paid.
-        _registrar_atribuicao_fail_open(order_id, "purchase_completed")
 
 
 def _payload_minimo_job(order_id: str, event_type: str) -> dict:
