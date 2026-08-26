@@ -673,6 +673,10 @@ def processar_boleto_criado(dados, expires_at_override: str = ""):
     info = _dados_boleto(dados)
     order_id = info["order_id"]
     expires_at = _texto(expires_at_override) or info["expires_at"]
+    webhook_ordem = _ordem(dados)
+    webhook_link = _normalizar_boleto_link(
+        webhook_ordem.get("boleto_url") or webhook_ordem.get("boleto_URL")
+    )
     if not order_id:
         return False
     venda = confirmar_venda_kiwify(
@@ -689,7 +693,7 @@ def processar_boleto_criado(dados, expires_at_override: str = ""):
             return True
         return False
     email = _texto(venda.get("email"))
-    boleto_link = _normalizar_boleto_link(venda.get("boleto_url"))
+    boleto_link = _normalizar_boleto_link(venda.get("boleto_url")) or webhook_link
     if not email or not boleto_link:
         return False
     first_name = _primeiro_nome(venda.get("first_name"))
