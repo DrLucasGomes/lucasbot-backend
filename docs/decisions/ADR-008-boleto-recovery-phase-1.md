@@ -30,6 +30,10 @@ PIX nao remove boleto.
 observada no webhook e normalizada deterministicamente para meia-noite UTC e nao
 e usada como instante de cancelamento.
 
+Os testes locais validam os contratos Python e a estrutura declarada das RPCs,
+mas nao simulam execucao PostgreSQL. A migration 010, suas RPCs, fencing, RLS e
+grants devem ser validados no projeto Supabase antes do deploy.
+
 ## Fora da fase 1
 
 Nao existe job, timer, sleep nem remocao de tag baseada no relogio. Antes de

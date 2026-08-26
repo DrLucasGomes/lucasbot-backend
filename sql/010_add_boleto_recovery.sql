@@ -236,6 +236,26 @@ select
     expires_at
 from public.recovery_pix_orders;
 
+-- Mantem a view historica semanticamente exclusiva de PIX. Linhas anteriores
+-- a payment_method sao PIX e permanecem visiveis por compatibilidade.
+create or replace view public.recovery_pix_attribution
+with (security_invoker = true)
+as
+select
+    order_id,
+    recovery_completed_at,
+    paid_confirmed_at,
+    (recovery_completed_at is not null and paid_confirmed_at is not null
+     and paid_confirmed_at >= recovery_completed_at) as recovery_conversion,
+    case
+        when recovery_completed_at is not null and paid_confirmed_at is not null
+         and paid_confirmed_at >= recovery_completed_at
+        then extract(epoch from (paid_confirmed_at - recovery_completed_at))
+        else null
+    end as conversion_delay_seconds
+from public.recovery_pix_orders
+where payment_method = 'pix' or payment_method is null;
+
 alter table public.recovery_pix_orders enable row level security;
 alter table public.recovery_pix_jobs enable row level security;
 revoke all on table public.recovery_pix_orders from public, anon, authenticated;
@@ -267,5 +287,6 @@ grant execute on function public.recovery_pix_cancel(text, text, text)
 revoke all on table public.recovery_payment_attribution
     from public, anon, authenticated;
 grant select on table public.recovery_payment_attribution to service_role;
-
--- public.recovery_pix_attribution e deliberadamente preservada sem alteracao.
+revoke all on table public.recovery_pix_attribution
+    from public, anon, authenticated;
+grant select on table public.recovery_pix_attribution to service_role;

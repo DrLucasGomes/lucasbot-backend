@@ -134,7 +134,7 @@ def test_boleto_confirma_server_to_server_antes_do_ledger(monkeypatch):
     assert eventos[0] == (
         "confirm",
         "boleto",
-        pix_recovery.KIWIFY_PENDING_STATUSES,
+        {"waiting_payment"},
     )
     assert eventos[1][0] == "acquire"
     assert eventos[1][1][3:] == (
@@ -470,7 +470,7 @@ def test_migration_010_generaliza_sem_tabela_duplicada_e_preserva_view_pix():
     assert "primary key" not in normalized
     assert "create table" not in normalized
     assert "create or replace view public.recovery_payment_attribution" in normalized
-    assert "public.recovery_pix_attribution e deliberadamente preservada" in normalized
+    assert "create or replace view public.recovery_pix_attribution" in normalized
     assert "paid_confirmed_at >= recovery_completed_at" in normalized
     assert "coalesce(recovery_completed_at, now())" in normalized
     assert "coalesce(p_payment_method, 'pix')" in normalized
@@ -489,3 +489,164 @@ def test_migration_nao_persiste_barcode_url_nem_automatiza_expiracao():
     assert "pg_cron" not in sql
     assert "sleep" not in sql
     assert "expiry_job" not in sql
+
+
+@pytest.mark.parametrize(
+    "first_name",
+    [None, "", "   ", 123, "none", "null", "undefined", "{{first_name}}"],
+)
+def test_subscribe_boleto_omite_first_name_invalido(monkeypatch, first_name):
+    enviados = []
+    monkeypatch.setenv("TAG_BOLETO_ID", "tag-boleto")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda _url, **kwargs: enviados.append(kwargs["json"]) or FakeResponse(201),
+    )
+    assert pix_recovery._alterar_tag_boleto_kit(
+        "oficial@example.com", "subscribe", first_name
+    ) is True
+    assert enviados == [{"api_secret": "secret", "email": "oficial@example.com"}]
+
+
+def test_subscribe_boleto_normaliza_primeiro_nome_sem_put(monkeypatch):
+    enviados = []
+    puts = []
+    monkeypatch.setenv("TAG_BOLETO_ID", "tag-boleto")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
+    monkeypatch.setattr(
+        pix_recovery.requests,
+        "post",
+        lambda _url, **kwargs: enviados.append(kwargs["json"]) or FakeResponse(201),
+    )
+    monkeypatch.setattr(
+        pix_recovery.requests, "put", lambda *args, **kwargs: puts.append((args, kwargs))
+    )
+    assert pix_recovery._alterar_tag_boleto_kit(
+        "oficial@example.com", "subscribe", "  Maria   de Souza "
+    ) is True
+    assert enviados[0]["first_name"] == "Maria"
+    assert puts == []
+
+
+def test_confirmacao_boleto_exige_waiting_payment_sem_efeitos(monkeypatch):
+    efeitos = []
+
+    def confirmar(_order_id, statuses_aceitos, payment_method_esperado=None):
+        efeitos.append((statuses_aceitos, payment_method_esperado))
+        return {}  # A API oficial respondeu pending, portanto a confirmacao falhou.
+
+    monkeypatch.setattr(pix_recovery, "confirmar_venda_kiwify", confirmar)
+    monkeypatch.setattr(
+        pix_recovery, "adquirir_processamento", lambda *a: efeitos.append("ledger")
+    )
+    monkeypatch.setattr(
+        pix_recovery, "_alterar_tag_boleto_kit", lambda *a: efeitos.append("kit")
+    )
+    monkeypatch.setattr(pix_recovery, "buscar_ledger", lambda *a: {})
+    assert pix_recovery.processar_boleto_criado(payload_boleto()) is False
+    assert efeitos == [({"waiting_payment"}, "boleto")]
+
+
+@pytest.mark.parametrize("estado_stale", ["processing", "subscribing"])
+def test_sql_acquire_boleto_preserva_stale_e_cas(estado_stale):
+    sql = (
+        Path(__file__).parents[1] / "sql" / "010_add_boleto_recovery.sql"
+    ).read_text(encoding="utf-8").lower()
+    normalized = " ".join(sql.split())
+    assert "status in ('processing', 'subscribing')" in normalized
+    assert "updated_at < now() - make_interval" in normalized
+    assert "attempt_token = p_attempt_token" in normalized
+    assert estado_stale in normalized
+
+
+def test_paid_concorrente_com_subscribing_compensa_somente_boleto(monkeypatch):
+    eventos = []
+    monkeypatch.setattr(
+        pix_recovery,
+        "reabrir_cancelamento",
+        lambda *args: eventos.append(("reopen", args)) or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "reconciliar_cancelamento_boleto",
+        lambda *args: eventos.append(("boleto", args)) or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "reconciliar_cancelamento",
+        lambda *args: eventos.append(("pix", args)) or True,
+    )
+    assert pix_recovery.compensar_subscribe_boleto_concorrente(
+        ORDER_ID, "oficial@example.com", "attempt-antigo"
+    ) is True
+    assert [evento[0] for evento in eventos] == ["reopen", "boleto"]
+
+
+def test_retry_boleto_apos_falha_kit(monkeypatch):
+    efeitos = iter([False, True])
+    falhas = []
+    conclusoes = []
+    monkeypatch.setattr(pix_recovery, "adquirir_job_pix", lambda *args: True)
+    monkeypatch.setattr(
+        pix_recovery, "processar_boleto_criado", lambda *args: next(efeitos)
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "falhar_job_pix",
+        lambda *args, **kwargs: falhas.append(args) or True,
+    )
+    monkeypatch.setattr(
+        pix_recovery,
+        "concluir_job_pix",
+        lambda *args: conclusoes.append(args) or True,
+    )
+    assert pix_recovery.processar_job_pix(ORDER_ID, "billet_created") is False
+    assert pix_recovery.processar_job_pix(ORDER_ID, "billet_created") is True
+    assert len(falhas) == 1
+    assert len(conclusoes) == 1
+
+
+def test_fencing_sql_exige_attempt_token_em_jobs_e_ledger():
+    sql_007 = (
+        Path(__file__).parents[1] / "sql" / "007_create_recovery_pix_jobs.sql"
+    ).read_text(encoding="utf-8").lower()
+    sql_010 = (
+        Path(__file__).parents[1] / "sql" / "010_add_boleto_recovery.sql"
+    ).read_text(encoding="utf-8").lower()
+    assert sql_007.count("and attempt_token = p_attempt_token") >= 2
+    assert "and attempt_token = p_attempt_token" in sql_010
+
+
+def test_duplicate_billet_e_paid_preservam_chaves_logicas():
+    sql_007 = (
+        Path(__file__).parents[1] / "sql" / "007_create_recovery_pix_jobs.sql"
+    ).read_text(encoding="utf-8").lower()
+    sql_010 = (
+        Path(__file__).parents[1] / "sql" / "010_add_boleto_recovery.sql"
+    ).read_text(encoding="utf-8").lower()
+    normalized = " ".join(sql_010.split())
+    assert "primary key (order_id, event_type)" in sql_007
+    assert "on conflict (order_id, event_type) do update" in normalized
+    assert "where excluded.event_type = 'paid'" in normalized
+    assert "coalesce( public.recovery_pix_orders.paid_confirmed_at" in normalized
+
+
+def test_views_separam_pix_boleto_e_preservam_pix_historico():
+    sql = (
+        Path(__file__).parents[1] / "sql" / "010_add_boleto_recovery.sql"
+    ).read_text(encoding="utf-8").lower()
+    normalized = " ".join(sql.split())
+    inicio_unificada = normalized.index(
+        "create or replace view public.recovery_payment_attribution"
+    )
+    inicio_pix = normalized.index(
+        "create or replace view public.recovery_pix_attribution"
+    )
+    fim_pix = normalized.index("alter table public.recovery_pix_orders", inicio_pix)
+    view_unificada = normalized[inicio_unificada:inicio_pix]
+    view_pix = normalized[inicio_pix:fim_pix]
+    assert "where payment_method = 'pix' or payment_method is null" in view_pix
+    assert "payment_method" in view_unificada
+    assert "where payment_method" not in view_unificada

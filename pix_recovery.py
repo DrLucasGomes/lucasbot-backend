@@ -15,7 +15,7 @@ from kit_utils import (
     metadados_resposta_subscribe,
     primeiro_nome as _primeiro_nome,
 )
-from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
+from main import STATUS_PAGOS, URL, obter_headers_supabase, valor_valido, webhook_kiwify
 
 
 router = APIRouter(tags=["kiwify-pix-recovery"])
@@ -494,8 +494,11 @@ def _alterar_tag_boleto_kit(email: str, acao: str, first_name: str = "") -> bool
         return False
 
     payload = {"api_secret": api_secret, "email": email}
-    if acao == "subscribe" and first_name:
-        payload["first_name"] = first_name
+    first_name_normalizado = (
+        _primeiro_nome(first_name) if valor_valido(first_name) else ""
+    )
+    if acao == "subscribe" and first_name_normalizado:
+        payload["first_name"] = first_name_normalizado
     resposta = requests.post(
         f"{KIT_BASE_URL}/tags/{tag_id}/{acao}", json=payload, timeout=5
     )
@@ -648,7 +651,7 @@ def processar_boleto_criado(dados, expires_at_override: str = ""):
         return False
     venda = confirmar_venda_kiwify(
         order_id,
-        statuses_aceitos=KIWIFY_PENDING_STATUSES,
+        statuses_aceitos={"waiting_payment"},
         payment_method_esperado="boleto",
     )
     if not venda:
