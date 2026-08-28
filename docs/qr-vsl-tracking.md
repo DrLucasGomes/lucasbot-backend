@@ -20,20 +20,18 @@ Para `/v/{codigo}`, o registro em `click_sessions` usa:
 - `utm_campaign=vigor_<canal>_<numero>`;
 - `utm_content=<codigo>`, por exemplo `yt101`.
 
-O redirecionamento acrescenta ainda um `src` único no formato:
-
-`qr_<codigo>_<token-do-click>`
+No redirecionamento para a VSL, `src` identifica o QR/campanha de forma estável e `utm_term` transporta o token único daquele registro em `click_sessions`.
 
 Exemplo conceitual:
 
-`/v/yt101 -> VSL?src=qr_yt101_<token>&utm_source=youtube&utm_medium=qrcode&utm_campaign=vigor_yt_101&utm_content=yt101`
+`/v/yt101 -> VSL?src=qr_yt101&utm_source=youtube&utm_medium=qrcode&utm_campaign=vigor_yt_101&utm_content=yt101&utm_term=<token>`
 
 A VSL já preserva `src` e UTMs no botão de checkout. O webhook `/kiwify` já persiste esses valores em `checkout_src` e `checkout_utm_*`.
 
 Isso permite duas leituras:
 
-1. conversão agregada por QR/vídeo usando `utm_content` e `utm_campaign`;
-2. futura ligação exata entre uma venda e um escaneamento específico usando o token embutido em `checkout_src`.
+1. conversão agregada por QR/vídeo usando `src`, `utm_content` e `utm_campaign`;
+2. futura ligação exata entre uma venda e um escaneamento específico comparando `checkout_utm_term` com `click_sessions.token`.
 
 ## Disponibilidade
 
