@@ -281,7 +281,7 @@ def test_falha_convertkit_lead_nao_quebra_resposta_webhook(monkeypatch):
 
 
 def test_convertkit_abandono_falha_de_rede_nao_derruba_funcao(monkeypatch):
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_ABANDONO_ID", "10")
 
     def falha(*args, **kwargs):
@@ -293,7 +293,7 @@ def test_convertkit_abandono_falha_de_rede_nao_derruba_funcao(monkeypatch):
 
 def test_convertkit_pago_adiciona_comprador_e_remove_abandono(monkeypatch):
     chamadas = []
-    monkeypatch.setenv("CONVERTKIT_API_KEY", "key")
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
     monkeypatch.setenv("TAG_COMPRADOR_ID", "20")
     monkeypatch.setenv("TAG_ABANDONO_ID", "10")
 
@@ -306,6 +306,26 @@ def test_convertkit_pago_adiciona_comprador_e_remove_abandono(monkeypatch):
 
     assert any("/tags/20/subscribe" in url for url, _ in chamadas)
     assert any("/tags/10/unsubscribe" in url for url, _ in chamadas)
+    assert all(payload["api_secret"] == "secret" for _, payload in chamadas)
+
+
+def test_convertkit_pago_tenta_remover_abandono_mesmo_se_tag_comprador_falhar(monkeypatch):
+    chamadas = []
+    monkeypatch.setenv("CONVERTKIT_API_SECRET", "secret")
+    monkeypatch.setenv("TAG_COMPRADOR_ID", "20")
+    monkeypatch.setenv("TAG_ABANDONO_ID", "10")
+
+    def fake_post(url, json=None, timeout=None, **kwargs):
+        chamadas.append(url)
+        if "/tags/20/subscribe" in url:
+            raise RuntimeError("falha comprador")
+        return FakeResponse(200, {"ok": True}, "ok")
+
+    monkeypatch.setattr(main.requests, "post", fake_post)
+    main.gerenciar_tags_convertkit("buyer@example.com", "paid")
+
+    assert any("/tags/20/subscribe" in url for url in chamadas)
+    assert any("/tags/10/unsubscribe" in url for url in chamadas)
 
 
 def test_manychat_headers_refletem_token_atual(monkeypatch):
