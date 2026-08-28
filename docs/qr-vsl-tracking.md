@@ -56,3 +56,38 @@ Para cada código, a conversão básica pode ser calculada como:
 `compras atribuídas ao código / registros em click_sessions do código`
 
 Exemplo: `yt101` pode ser usado em um único vídeo para medir escaneamentos, checkouts e vendas daquele conteúdo.
+
+## Validação em produção — 28/08/2026
+
+A primeira rota de QR para a VSL foi validada em produção com o código `yt101`.
+
+URL pública confirmada:
+
+`https://lucasbot-backend.onrender.com/v/yt101`
+
+O fluxo confirmado é:
+
+`QR -> /v/yt101 -> click_sessions -> VSL com src/UTMs -> checkout Kiwify -> /kiwify -> Supabase`
+
+Após a confirmação da rota pública, foi gerado um QR Code em preto sobre fundo branco apontando exatamente para essa URL. O arquivo foi validado por leitura automática do QR e o valor decodificado retornou exatamente:
+
+`https://lucasbot-backend.onrender.com/v/yt101`
+
+Isso confirma que o QR utilizado para `yt101` é funcional e aponta para a rota rastreável correta.
+
+### Convenção operacional
+
+Usar um código distinto por peça de conteúdo quando for necessário medir desempenho individual. Para YouTube, seguir a sequência:
+
+- `yt101`
+- `yt102`
+- `yt103`
+- ...
+
+Cada código deve ser associado a um único vídeo/peça sempre que o objetivo for comparar scans, checkouts e vendas por conteúdo.
+
+Para Instagram e Facebook, manter a mesma lógica usando os prefixos `ig` e `fb`.
+
+### Status
+
+Em 28/08/2026, a infraestrutura de QR rastreável para a VSL está implementada, mesclada na `main`, com CI aprovada e primeira rota (`yt101`) confirmada em produção.
