@@ -48,6 +48,22 @@ def test_interpretar_codigo_pdf():
     assert meta["utm_content"] == "pdf101"
 
 
+def test_headers_supabase_secret_key_usa_apikey_sem_bearer(monkeypatch):
+    monkeypatch.setenv("SUPABASE_KEY", "sb_secret_exemplo")
+    headers = tracking_routes.headers_supabase()
+
+    assert headers["apikey"] == "sb_secret_exemplo"
+    assert "Authorization" not in headers
+
+
+def test_headers_supabase_legacy_jwt_mantem_bearer(monkeypatch):
+    monkeypatch.setenv("SUPABASE_KEY", "eyJlegacy.jwt")
+    headers = tracking_routes.headers_supabase()
+
+    assert headers["apikey"] == "eyJlegacy.jwt"
+    assert headers["Authorization"] == "Bearer eyJlegacy.jwt"
+
+
 def test_codigo_invalido_retorna_404(monkeypatch):
     monkeypatch.setenv("WHATSAPP_NUMBER", "5549999999999")
     resposta = client.get("/r/xyz", follow_redirects=False)
