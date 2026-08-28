@@ -44,13 +44,24 @@ def interpretar_codigo(codigo: str) -> dict:
 
 
 def headers_supabase() -> dict:
-    chave = os.getenv("SUPABASE_KEY")
-    return {
+    """
+    Headers para PostgREST compativeis com chaves novas e legadas do Supabase.
+
+    Chaves sb_secret_/sb_publishable_ nao sao JWT e devem ir apenas em `apikey`.
+    As chaves JWT legadas continuam recebendo Authorization: Bearer para manter
+    compatibilidade com deployments antigos.
+    """
+    chave = str(os.getenv("SUPABASE_KEY") or "").strip()
+    headers = {
         "apikey": chave,
-        "Authorization": f"Bearer {chave}",
         "Content-Type": "application/json",
         "Prefer": "return=representation",
     }
+
+    if chave and not chave.startswith(("sb_secret_", "sb_publishable_")):
+        headers["Authorization"] = f"Bearer {chave}"
+
+    return headers
 
 
 def extrair_ip(request: Request) -> str | None:
@@ -124,7 +135,6 @@ def redirect_tracking(codigo: str, request: Request):
 
     resposta = salvar_click(registro)
     if resposta.status_code not in (200, 201, 204):
-        # Branch de teste: devolve o erro real do Supabase para diagnostico.
         detalhe = resposta.text[:1500] if resposta.text else "sem corpo de resposta"
         print(f"[TRACKING] Supabase {resposta.status_code}: {detalhe}")
         raise HTTPException(
