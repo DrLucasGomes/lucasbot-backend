@@ -14,7 +14,6 @@ URL = "https://gwxcnczuwfrswhkzflaw.supabase.co"
 
 KEY = os.getenv("SUPABASE_KEY")
 MANYCHAT_TOKEN = os.getenv("MANYCHAT_TOKEN")
-CONVERTKIT_API_KEY = os.getenv("CONVERTKIT_API_KEY")
 TAG_LEAD_ID = os.getenv("TAG_LEAD_ID")
 TAG_ABANDONO_ID = os.getenv("TAG_ABANDONO_ID")
 TAG_COMPRADOR_ID = os.getenv("TAG_COMPRADOR_ID")
@@ -350,41 +349,77 @@ def adicionar_lead_convertkit(email: str, first_name: str = ""):
     except Exception as e:
         print(f"[ConvertKit Lead] Subscribe falhou: {type(e).__name__}")
 
-def gerenciar_tags_convertkit(email: str, status_pagamento: str):
-    base_url = "https://api.convertkit.com/v3"
-    payload = {
-        "api_key": os.getenv("CONVERTKIT_API_KEY"),
-        "email": email
-    }
 
+def gerenciar_tags_convertkit(email: str, status_pagamento: str):
+    """Sincroniza tags de abandono/comprador no Kit de forma convergente."""
+    base_url = "https://api.convertkit.com/v3"
+    api_secret = os.getenv("CONVERTKIT_API_SECRET")
+    tag_abandono_id = os.getenv("TAG_ABANDONO_ID")
+    tag_comprador_id = os.getenv("TAG_COMPRADOR_ID")
+
+    if not valor_valido(email) or not valor_valido(api_secret):
+        print("[ConvertKit] email ou CONVERTKIT_API_SECRET ausente")
+        return
+
+    payload = {
+        "api_secret": api_secret,
+        "email": str(email).strip()
+    }
     status_pagamento = str(status_pagamento).strip().lower()
 
-    is_abandoned = status_pagamento in ["abandoned", "cart_abandoned"]
-    is_approved = status_pagamento in ["paid", "approved", "order_approved"]
-
-    if is_abandoned:
-        url = f"{base_url}/tags/{os.getenv('TAG_ABANDONO_ID')}/subscribe"
-
-        try:
-            r = requests.post(url, json=payload, timeout=10)
-            print(f"[ConvertKit] Abandono aplicado: {email} | {r.status_code} | {r.text}")
-        except Exception as e:
-            print(f"[ConvertKit Erro] Falha ao aplicar abandono: {str(e)}")
-
-    elif is_approved:
-        url_add = f"{base_url}/tags/{os.getenv('TAG_COMPRADOR_ID')}/subscribe"
-        url_remove = f"{base_url}/tags/{os.getenv('TAG_ABANDONO_ID')}/unsubscribe"
+    if status_pagamento in STATUS_ABANDONO:
+        if not valor_valido(tag_abandono_id):
+            print("[ConvertKit] TAG_ABANDONO_ID ausente")
+            return
 
         try:
-            r1 = requests.post(url_add, json=payload, timeout=10)
-            print(f"[ConvertKit] Comprador aplicado: {email} | {r1.status_code} | {r1.text}")
-
-            if os.getenv("TAG_ABANDONO_ID"):
-                r2 = requests.post(url_remove, json=payload, timeout=10)
-                print(f"[ConvertKit] Abandono removido: {email} | {r2.status_code} | {r2.text}")
-
+            response = requests.post(
+                f"{base_url}/tags/{tag_abandono_id}/subscribe",
+                json=payload,
+                timeout=10
+            )
+            print(
+                "[ConvertKit] operation=abandoned_subscribe "
+                f"status_http={response.status_code}"
+            )
         except Exception as e:
-            print(f"[ConvertKit Erro] Falha ao atualizar comprador: {str(e)}")
+            print(f"[ConvertKit] abandoned_subscribe falhou: {type(e).__name__}")
+        return
+
+    if status_pagamento not in STATUS_PAGOS:
+        return
+
+    if valor_valido(tag_comprador_id):
+        try:
+            response = requests.post(
+                f"{base_url}/tags/{tag_comprador_id}/subscribe",
+                json=payload,
+                timeout=10
+            )
+            print(
+                "[ConvertKit] operation=buyer_subscribe "
+                f"status_http={response.status_code}"
+            )
+        except Exception as e:
+            print(f"[ConvertKit] buyer_subscribe falhou: {type(e).__name__}")
+    else:
+        print("[ConvertKit] TAG_COMPRADOR_ID ausente")
+
+    # A limpeza da recuperação é independente da aplicação da tag de comprador.
+    # Assim, uma falha em uma chamada não impede a outra.
+    if valor_valido(tag_abandono_id):
+        try:
+            response = requests.post(
+                f"{base_url}/tags/{tag_abandono_id}/unsubscribe",
+                json=payload,
+                timeout=10
+            )
+            print(
+                "[ConvertKit] operation=abandoned_unsubscribe "
+                f"status_http={response.status_code}"
+            )
+        except Exception as e:
+            print(f"[ConvertKit] abandoned_unsubscribe falhou: {type(e).__name__}")
 
 
 def buscar_lead_por_campo(campo: str, valor: str):
