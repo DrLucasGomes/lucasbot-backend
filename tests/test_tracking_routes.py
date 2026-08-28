@@ -38,6 +38,16 @@ def test_interpretar_codigo_facebook():
     assert meta["campanha"] == "Vigor_FB_108"
 
 
+def test_interpretar_codigo_pdf():
+    meta = tracking_routes.interpretar_codigo("PDF101")
+    assert meta["origem"] == "PDF"
+    assert meta["campanha"] == "Vigor_PDF_101"
+    assert meta["video"] == "101"
+    assert meta["utm_source"] == "pdf"
+    assert meta["utm_campaign"] == "vigor_pdf_101"
+    assert meta["utm_content"] == "pdf101"
+
+
 def test_codigo_invalido_retorna_404(monkeypatch):
     monkeypatch.setenv("WHATSAPP_NUMBER", "5549999999999")
     resposta = client.get("/r/xyz", follow_redirects=False)
@@ -154,6 +164,33 @@ def test_qr_vsl_grava_click_e_redireciona_com_token_unico(monkeypatch):
     assert query["utm_campaign"] == ["vigor_yt_101"]
     assert query["utm_content"] == ["yt101"]
     assert query["src"] == ["qr_yt101"]
+    assert query["utm_term"] == [capturado["json"]["token"]]
+
+
+def test_qr_vsl_pdf_registra_scan_e_redireciona(monkeypatch):
+    capturado = {}
+    monkeypatch.setenv("VSL_URL", "https://drlucasgomes.com.br/protocolo-vigor-360/")
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        capturado["json"] = json
+        return FakeResponse(201)
+
+    monkeypatch.setattr(tracking_routes.requests, "post", fake_post)
+
+    resposta = client.get("/v/pdf101", follow_redirects=False)
+    assert resposta.status_code == 302
+    assert capturado["json"]["origem"] == "PDF"
+    assert capturado["json"]["campanha"] == "Vigor_PDF_101"
+    assert capturado["json"]["utm_source"] == "pdf"
+    assert capturado["json"]["utm_medium"] == "qrcode"
+    assert capturado["json"]["utm_content"] == "pdf101"
+
+    query = parse_qs(urlparse(resposta.headers["location"]).query)
+    assert query["src"] == ["qr_pdf101"]
+    assert query["utm_source"] == ["pdf"]
+    assert query["utm_medium"] == ["qrcode"]
+    assert query["utm_campaign"] == ["vigor_pdf_101"]
+    assert query["utm_content"] == ["pdf101"]
     assert query["utm_term"] == [capturado["json"]["token"]]
 
 

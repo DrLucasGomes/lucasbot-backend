@@ -16,9 +16,9 @@ DEFAULT_VSL_URL = "https://drlucasgomes.com.br/protocolo-vigor-360/"
 
 
 def interpretar_codigo(codigo: str) -> dict:
-    """Converte codigos curtos (yt101, fb108, ig22) em metadados de origem."""
+    """Converte codigos curtos (yt101, fb108, ig22, pdf101) em metadados de origem."""
     texto = str(codigo or "").strip().lower()
-    match = re.fullmatch(r"(yt|fb|ig)(\d+)", texto)
+    match = re.fullmatch(r"(yt|fb|ig|pdf)(\d+)", texto)
     if not match:
         raise ValueError("codigo de rastreamento invalido")
 
@@ -27,6 +27,7 @@ def interpretar_codigo(codigo: str) -> dict:
         "yt": "YouTube",
         "fb": "Facebook",
         "ig": "Instagram",
+        "pdf": "PDF",
     }
 
     return {
@@ -139,7 +140,7 @@ def redirect_tracking(codigo: str, request: Request):
 def redirect_vsl_tracking(codigo: str, request: Request):
     """
     Registra o escaneamento/clique do QR e abre a VSL com atribuicao preservada.
-    Ex.: /v/yt101 -> click_sessions -> VSL com src + UTMs + token unico.
+    Ex.: /v/yt101 ou /v/pdf101 -> click_sessions -> VSL com src + UTMs + token unico.
 
     Diferente de /r, falha de persistencia do tracking nao bloqueia a VSL:
     perder telemetria e preferivel a perder uma visita/venda.
