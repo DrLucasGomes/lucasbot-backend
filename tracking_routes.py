@@ -69,7 +69,12 @@ def salvar_click(registro: dict):
 
 
 def montar_url_vsl(meta: dict, token: str, base_url: str | None = None) -> str:
-    """Monta a URL da VSL preservando query existente e acrescentando tracking do QR."""
+    """
+    Monta a URL da VSL preservando query existente e acrescentando tracking do QR.
+
+    `src` identifica o QR/campanha de forma agregavel; `utm_term` carrega o token
+    unico de click_sessions para permitir ligar uma compra ao scan especifico.
+    """
     destino_base = str(base_url or os.getenv("VSL_URL") or DEFAULT_VSL_URL).strip()
     parsed = urlsplit(destino_base)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -77,14 +82,13 @@ def montar_url_vsl(meta: dict, token: str, base_url: str | None = None) -> str:
 
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query.update({
-        "src": f"qr_{meta['utm_content']}_{token}",
+        "src": f"qr_{meta['utm_content']}",
         "utm_source": meta.get("utm_source"),
         "utm_medium": meta.get("utm_medium"),
         "utm_campaign": meta.get("utm_campaign"),
         "utm_content": meta.get("utm_content"),
+        "utm_term": token,
     })
-    if meta.get("utm_term"):
-        query["utm_term"] = meta["utm_term"]
 
     return urlunsplit((
         parsed.scheme,
@@ -135,7 +139,7 @@ def redirect_tracking(codigo: str, request: Request):
 def redirect_vsl_tracking(codigo: str, request: Request):
     """
     Registra o escaneamento/clique do QR e abre a VSL com atribuicao preservada.
-    Ex.: /v/yt101 -> click_sessions -> VSL com src unico + UTMs.
+    Ex.: /v/yt101 -> click_sessions -> VSL com src + UTMs + token unico.
 
     Diferente de /r, falha de persistencia do tracking nao bloqueia a VSL:
     perder telemetria e preferivel a perder uma visita/venda.
