@@ -4,6 +4,7 @@
 
 - [Arquitetura](ARCHITECTURE.md)
 - [Caminhos críticos](CRITICAL_PATHS.md)
+- [Tracking de QR para a VSL](docs/qr-vsl-tracking.md)
 
 ### Decisões arquiteturais
 
