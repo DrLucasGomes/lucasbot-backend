@@ -11,6 +11,7 @@
 - [ADR-001: `journey_events` append-only](docs/decisions/ADR-001-journey-events-append-only.md)
 - [ADR-002: `journey_run_id`](docs/decisions/ADR-002-journey-run-id.md)
 - [ADR-003: Render Starter para evitar spin-down](docs/decisions/ADR-003-render-starter-no-spin-down.md)
+- [ADR-004: QR Code rastreável para a VSL](docs/decisions/ADR-004-qr-vsl-tracking.md)
 
 ### Antes de alterar produção
 
