@@ -111,15 +111,15 @@ def test_montar_url_vsl_preserva_query_e_adiciona_tracking():
     assert parsed.netloc == "drlucasgomes.com.br"
     assert parsed.path == "/protocolo-vigor-360/"
     assert query["foo"] == ["bar"]
-    assert query["src"] == ["qr_yt101_TOKEN_123456"]
+    assert query["src"] == ["qr_yt101"]
     assert query["utm_source"] == ["youtube"]
     assert query["utm_medium"] == ["qrcode"]
     assert query["utm_campaign"] == ["vigor_yt_101"]
     assert query["utm_content"] == ["yt101"]
-    assert "utm_term" not in query
+    assert query["utm_term"] == ["TOKEN_123456"]
 
 
-def test_qr_vsl_grava_click_e_redireciona_com_src_unico(monkeypatch):
+def test_qr_vsl_grava_click_e_redireciona_com_token_unico(monkeypatch):
     capturado = {}
     monkeypatch.setenv("TRACKING_IP_SALT", "segredo-teste")
     monkeypatch.setenv("VSL_URL", "https://drlucasgomes.com.br/protocolo-vigor-360/")
@@ -153,7 +153,8 @@ def test_qr_vsl_grava_click_e_redireciona_com_src_unico(monkeypatch):
     assert query["utm_medium"] == ["qrcode"]
     assert query["utm_campaign"] == ["vigor_yt_101"]
     assert query["utm_content"] == ["yt101"]
-    assert query["src"] == [f"qr_yt101_{capturado['json']['token']}"]
+    assert query["src"] == ["qr_yt101"]
+    assert query["utm_term"] == [capturado["json"]["token"]]
 
 
 def test_qr_vsl_codigo_invalido_retorna_404():
