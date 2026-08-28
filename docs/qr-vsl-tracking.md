@@ -2,14 +2,21 @@
 
 ## Objetivo
 
-Permitir que QR Codes usados em YouTube, Shorts, Instagram, Facebook e materiais em PDF levem diretamente à VSL do Protocolo Vigor 360 sem perder a atribuição de origem.
+Permitir que QR Codes usados em YouTube, Shorts, Instagram, Facebook e materiais em PDF levem diretamente à VSL do Protocolo Vigor 360 sem perder a atribuição de origem, campanha, peça de conteúdo e, quando houver compra, do scan individual que originou a venda.
 
 ## Rotas
 
-- `GET /r/{codigo}` continua exclusivo do fluxo já existente `click_sessions -> WhatsApp`.
-- `GET /v/{codigo}` registra o escaneamento/clique em `click_sessions` e redireciona para a VSL.
+- `GET /r/{codigo}` continua exclusivo do fluxo `click_sessions -> WhatsApp`.
+- `GET /v/{codigo}` registra o scan/clique em `click_sessions` e redireciona para a VSL.
 
-Os códigos aceitos seguem os formatos `yt101`, `fb108`, `ig22` e `pdf101`.
+Os códigos aceitos seguem os formatos:
+
+- `ytNNN` - YouTube;
+- `fbNNN` - Facebook;
+- `igNNN` - Instagram;
+- `pdfNNN` - PDF.
+
+Exemplos: `yt101`, `fb108`, `ig22`, `pdf101`.
 
 ## Atribuição do QR
 
@@ -20,7 +27,13 @@ Para `/v/{codigo}`, o registro em `click_sessions` usa:
 - `utm_campaign=vigor_<canal>_<numero>`;
 - `utm_content=<codigo>`, por exemplo `yt101` ou `pdf101`.
 
-No redirecionamento para a VSL, `src` identifica o QR/campanha de forma estável e `utm_term` transporta o token único daquele registro em `click_sessions`.
+A `click_session` recebe ainda um `token` imprevisível e único.
+
+No redirecionamento para a VSL:
+
+- `src=qr_<codigo>` identifica o QR de forma estável para agregação;
+- `utm_source`, `utm_medium`, `utm_campaign` e `utm_content` preservam a atribuição agregada;
+- `utm_term=<click_sessions.token>` transporta o identificador único daquele scan.
 
 Exemplos conceituais:
 
@@ -28,20 +41,81 @@ Exemplos conceituais:
 
 `/v/pdf101 -> VSL?src=qr_pdf101&utm_source=pdf&utm_medium=qrcode&utm_campaign=vigor_pdf_101&utm_content=pdf101&utm_term=<token>`
 
-A VSL já preserva `src` e UTMs no botão de checkout. O webhook `/kiwify` já persiste esses valores em `checkout_src` e `checkout_utm_*`.
+## Nuance importante: `token` x `utm_term`
 
-Isso permite duas leituras:
+Dentro de `click_sessions`, o identificador individual do scan está em `token`.
 
-1. conversão agregada por QR/peça usando `src`, `utm_content` e `utm_campaign`;
-2. futura ligação exata entre uma venda e um escaneamento específico comparando `checkout_utm_term` com `click_sessions.token`.
+O campo `click_sessions.utm_term` pode permanecer `null`; isso é esperado no fluxo atual. Na montagem da URL da VSL, o backend copia `click_sessions.token` para o parâmetro de query `utm_term`.
 
-## Disponibilidade
+A VSL preserva esse parâmetro até a Kiwify e o webhook `/kiwify` o grava em `leads_vigor.checkout_utm_term`.
 
-O destino padrão é:
+A ligação exata é portanto:
 
-`https://drlucasgomes.com.br/protocolo-vigor-360/`
+`click_sessions.token = leads_vigor.checkout_utm_term`
 
-Pode ser sobrescrito por `VSL_URL` no ambiente. A URL precisa usar `http` ou `https` e possuir host válido.
+Isso foi validado em produção em 28/08/2026.
+
+## Persistência na compra
+
+A VSL preserva `src` e UTMs no botão de checkout. O webhook `/kiwify` extrai os parâmetros enviados pela Kiwify e persiste em `leads_vigor`:
+
+- `checkout_src`;
+- `checkout_utm_source`;
+- `checkout_utm_medium`;
+- `checkout_utm_campaign`;
+- `checkout_utm_content`;
+- `checkout_utm_term`;
+- `origem_compra`.
+
+Não foi criada nova coluna para classificar QR. A coluna existente `origem_compra` é suficiente.
+
+## Classificação de `origem_compra`
+
+Para compras originadas por QR Code, a classificação passa a distinguir canal e meio:
+
+- `youtube_qrcode`;
+- `facebook_qrcode`;
+- `instagram_qrcode`;
+- `pdf_qrcode`;
+- `qrcode_outro` para QR rastreado sem canal conhecido.
+
+Acessos não-QR continuam usando as classificações existentes, como `youtube_direto`, `facebook_direto`, `instagram_direto`, `pagina_vendas` e `manychat`. PDF direto pode ser classificado como `pdf_direto`.
+
+A migration `sql/011_backfill_qr_origem_compra.sql` corrige de forma idempotente registros antigos que tenham `checkout_utm_medium=qrcode` ou `checkout_src` iniciado por `qr_`.
+
+## Tabelas e migrations
+
+### `click_sessions`
+
+A tabela de scans/cliques é criada por:
+
+`sql/010_create_click_sessions.sql`
+
+Ela armazena, entre outros campos:
+
+- `token`;
+- origem/campanha/conteúdo;
+- UTMs;
+- `manychat_id` quando houver claim;
+- `claimed`, `claim_method`, `claim_confidence`;
+- `user_agent` e hash de IP;
+- `created_at`, `expires_at`, `claimed_at`.
+
+### Backfill de origem de compra
+
+`sql/011_backfill_qr_origem_compra.sql`
+
+Essa migration não cria coluna. Apenas normaliza `origem_compra` para compras QR já existentes.
+
+## Supabase e autenticação server-side
+
+O tracking roda no backend Render e usa `SUPABASE_KEY` apenas no servidor.
+
+Para chaves novas do Supabase no formato `sb_secret_...`, `tracking_routes.py` envia a chave no header `apikey` e não a trata como JWT em `Authorization: Bearer`.
+
+Chaves JWT legadas continuam compatíveis com `Authorization: Bearer`.
+
+A tabela `click_sessions` mantém RLS habilitado e acesso de escrita restrito ao `service_role`; não é necessário abrir INSERT para `anon`.
 
 ## Política de falha
 
@@ -49,64 +123,135 @@ No fluxo `/v/{codigo}`, falha ou timeout do Supabase não bloqueia o acesso à V
 
 Essa escolha é deliberada: uma indisponibilidade temporária de telemetria não deve provocar perda de visita ou venda.
 
-A rota `/r/{codigo}` não foi alterada e mantém o comportamento anterior.
+Por isso, um `302` isolado prova que o redirecionamento funcionou, mas não prova sozinho que a `click_session` foi persistida. A confirmação deve ser feita no Supabase ou por logs de erro/sucesso do tracking.
 
-## Métrica principal
+A rota `/r/{codigo}` mantém o comportamento anterior.
 
-Para cada código, a conversão básica pode ser calculada como:
+## Validação em produção — `pdf101` — 28/08/2026
 
-`compras atribuídas ao código / registros em click_sessions do código`
+O fluxo completo foi validado com uma compra PIX real de teste.
 
-Exemplo: `yt101` pode ser usado em um único vídeo para medir escaneamentos, checkouts e vendas daquele conteúdo; `pdf101` identifica especificamente o guia PDF “7 sinais que sua ereção está enfraquecendo”.
-
-## Validação em produção — 28/08/2026
-
-A primeira rota de QR para a VSL foi validada em produção com o código `yt101`.
-
-URL pública confirmada:
-
-`https://lucasbot-backend.onrender.com/v/yt101`
-
-O fluxo confirmado é:
-
-`QR -> /v/yt101 -> click_sessions -> VSL com src/UTMs -> checkout Kiwify -> /kiwify -> Supabase`
-
-Após a confirmação da rota pública, foi gerado um QR Code em preto sobre fundo branco apontando exatamente para essa URL. O arquivo foi validado por leitura automática do QR e o valor decodificado retornou exatamente:
-
-`https://lucasbot-backend.onrender.com/v/yt101`
-
-Isso confirma que o QR utilizado para `yt101` é funcional e aponta para a rota rastreável correta.
-
-## QR do PDF — `pdf101`
-
-O guia “7 sinais que sua ereção está enfraquecendo” usa um código próprio para separar sua atribuição da origem YouTube, Instagram e Facebook.
-
-A URL definitiva do QR do guia é:
+URL pública usada:
 
 `https://lucasbot-backend.onrender.com/v/pdf101`
 
-Quando acessada, a rota deve registrar uma `click_session` com origem `PDF`, `utm_source=pdf`, `utm_medium=qrcode`, `utm_campaign=vigor_pdf_101` e `utm_content=pdf101`, antes de redirecionar para a VSL.
+Fluxo comprovado:
 
-O QR embutido na página 10 do PDF final deve apontar exatamente para `/v/pdf101`, permitindo medir scans, checkouts e vendas gerados especificamente pelo guia.
+`PDF/QR -> /v/pdf101 -> click_sessions -> VSL -> checkout Kiwify -> PIX pago -> /kiwify -> leads_vigor`
 
-### Convenção operacional
+Campos confirmados na Kiwify e no Supabase:
 
-Usar um código distinto por peça de conteúdo quando for necessário medir desempenho individual. Para YouTube, seguir a sequência:
+- `src=qr_pdf101`;
+- `utm_source=pdf`;
+- `utm_medium=qrcode`;
+- `utm_campaign=vigor_pdf_101`;
+- `utm_content=pdf101`;
+- `utm_term=<token único do scan>`;
+- `status_pagamento=paid`.
+
+Também foi confirmado que o valor enviado à Kiwify em `utm_term` era exatamente o mesmo valor gravado anteriormente em `click_sessions.token`.
+
+Nenhum dado pessoal do comprador, CPF, telefone, e-mail, order id ou URL de acesso deve ser colocado na documentação do repositório.
+
+## Consultas operacionais
+
+### Scans por peça
+
+```sql
+select
+    token,
+    origem,
+    campanha,
+    utm_source,
+    utm_medium,
+    utm_content,
+    created_at
+from public.click_sessions
+where utm_content = 'pdf101'
+order by created_at desc;
+```
+
+### Compras atribuídas à peça
+
+```sql
+select
+    id,
+    status_pagamento,
+    produto,
+    checkout_src,
+    checkout_utm_source,
+    checkout_utm_medium,
+    checkout_utm_campaign,
+    checkout_utm_content,
+    checkout_utm_term,
+    origem_compra
+from public.leads_vigor
+where checkout_utm_content = 'pdf101';
+```
+
+### Ligação exata scan -> compra
+
+```sql
+select
+    c.token,
+    c.origem as origem_scan,
+    c.campanha,
+    c.utm_content as codigo_qr,
+    c.created_at as data_scan,
+    l.id as lead_id,
+    l.status_pagamento,
+    l.produto,
+    l.checkout_src,
+    l.checkout_utm_medium,
+    l.checkout_utm_content,
+    l.checkout_utm_term,
+    l.origem_compra
+from public.click_sessions c
+join public.leads_vigor l
+    on l.checkout_utm_term = c.token
+where c.utm_content = 'pdf101'
+order by c.created_at desc;
+```
+
+## Métricas
+
+Para cada código:
+
+`taxa de venda por scan = compras pagas atribuídas ao código / scans em click_sessions`
+
+A atribuição agregada usa `utm_content`, `utm_campaign`, `utm_source` e `origem_compra`.
+
+A atribuição individual usa:
+
+`leads_vigor.checkout_utm_term = click_sessions.token`
+
+## Convenção operacional
+
+Usar um código distinto por peça de conteúdo quando for necessário medir desempenho individual.
+
+YouTube:
 
 - `yt101`
 - `yt102`
 - `yt103`
 - ...
 
-Para PDFs, usar o prefixo `pdf`, por exemplo:
+PDF:
 
-- `pdf101` - guia “7 sinais que sua ereção está enfraquecendo”
-- `pdf102` - próximo material rastreável
+- `pdf101` - guia “7 sinais que sua ereção está enfraquecendo”;
+- `pdf102` - próximo material rastreável.
 
-Cada código deve ser associado a uma única peça sempre que o objetivo for comparar scans, checkouts e vendas por conteúdo.
+Instagram e Facebook seguem a mesma lógica com `ig` e `fb`.
 
-Para Instagram e Facebook, manter a mesma lógica usando os prefixos `ig` e `fb`.
+Cada código deve ficar associado a uma única peça sempre que o objetivo for comparar scans, checkouts e vendas por conteúdo.
 
-### Status
+## Status atual
 
-Em 28/08/2026, a infraestrutura de QR rastreável para a VSL está implementada para YouTube, Instagram, Facebook e PDF. A rota `yt101` já foi confirmada em produção; `pdf101` deve ser validada após o deploy desta extensão antes da distribuição do PDF final.
+Em 28/08/2026:
+
+- `/v/{codigo}` está implementado para YouTube, Facebook, Instagram e PDF;
+- `click_sessions` está criada e protegida;
+- o tracking usa headers compatíveis com `sb_secret_`;
+- `pdf101` foi validado em produção até uma compra PIX paga;
+- a ligação exata `click_sessions.token = leads_vigor.checkout_utm_term` foi comprovada;
+- `origem_compra` passa a distinguir QR por canal sem adicionar coluna nova.

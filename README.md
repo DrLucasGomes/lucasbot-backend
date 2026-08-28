@@ -12,6 +12,7 @@
 - [ADR-002: `journey_run_id`](docs/decisions/ADR-002-journey-run-id.md)
 - [ADR-003: Render Starter para evitar spin-down](docs/decisions/ADR-003-render-starter-no-spin-down.md)
 - [ADR-004: QR Code rastreável para a VSL](docs/decisions/ADR-004-qr-vsl-tracking.md)
+- [ADR-005: classificação de `origem_compra` para QR Codes](docs/decisions/ADR-005-qr-purchase-origin-classification.md)
 
 ### Antes de alterar produção
 

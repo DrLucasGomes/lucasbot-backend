@@ -257,18 +257,35 @@ def extrair_manychat_id_do_src(src):
     return None
 
 
-def classificar_origem_compra(src, utm_source):
+def classificar_origem_compra(src, utm_source, utm_medium=None):
+    """Classifica canal + meio sem exigir nova coluna no banco."""
     src_txt = str(src).strip().lower() if valor_valido(src) else ""
     utm_txt = str(utm_source).strip().lower() if valor_valido(utm_source) else ""
+    medium_txt = str(utm_medium).strip().lower() if valor_valido(utm_medium) else ""
 
     if src_txt.startswith("mc_") or utm_txt == "manychat":
         return "manychat"
+
+    eh_qrcode = medium_txt == "qrcode" or src_txt.startswith("qr_")
+    if eh_qrcode:
+        if utm_txt == "youtube" or src_txt.startswith("qr_yt"):
+            return "youtube_qrcode"
+        if utm_txt in ["facebook", "meta"] or src_txt.startswith("qr_fb"):
+            return "facebook_qrcode"
+        if utm_txt == "instagram" or src_txt.startswith("qr_ig"):
+            return "instagram_qrcode"
+        if utm_txt == "pdf" or src_txt.startswith("qr_pdf"):
+            return "pdf_qrcode"
+        return "qrcode_outro"
+
     if "youtube" in src_txt or utm_txt == "youtube":
         return "youtube_direto"
     if "facebook" in src_txt or utm_txt == "facebook" or "meta" in src_txt or utm_txt == "meta":
         return "facebook_direto"
     if "instagram" in src_txt or utm_txt == "instagram":
         return "instagram_direto"
+    if "pdf" in src_txt or utm_txt == "pdf":
+        return "pdf_direto"
     if "vsl" in src_txt or "pagina" in src_txt or utm_txt in ["pagina_vendas", "site"]:
         return "pagina_vendas"
     if src_txt or utm_txt:
@@ -487,7 +504,12 @@ async def webhook_kiwify(request: Request, background_tasks: BackgroundTasks):
         tracking = extrair_tracking_kiwify(dados_kiwify)
         checkout_src = tracking.get("checkout_src")
         checkout_utm_source = tracking.get("checkout_utm_source")
-        origem_compra = classificar_origem_compra(checkout_src, checkout_utm_source)
+        checkout_utm_medium = tracking.get("checkout_utm_medium")
+        origem_compra = classificar_origem_compra(
+            checkout_src,
+            checkout_utm_source,
+            checkout_utm_medium,
+        )
 
         ordem = dados_kiwify.get("order") or dados_kiwify.get("Order")
         carrinho = dados_kiwify.get("cart") or dados_kiwify.get("Cart")
