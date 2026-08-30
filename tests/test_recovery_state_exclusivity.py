@@ -59,11 +59,8 @@ def test_pix_remove_pos_clique_abandono_e_boleto(monkeypatch):
     )
 
     assert state.convergir_tags_kit("lead@example.com", "pix_pending") is True
-
     assert [url.rsplit("/", 2)[-2] for url, _ in posts] == [
-        "video",
-        "abandon",
-        "boleto",
+        "video", "abandon", "boleto"
     ]
     assert all("/pix/" not in url for url, _ in posts)
 
@@ -136,6 +133,7 @@ def test_wrapper_chama_handler_principal_uma_vez(monkeypatch):
         return {"status": "processado"}
 
     monkeypatch.setattr(state, "webhook_kiwify_com_pix", fake_inner)
+    monkeypatch.setattr(state, "comprador_ja_pago", lambda email: False)
     monkeypatch.setattr(state, "convergir_tags_kit", lambda email, estado: True)
 
     resposta = asyncio.run(
@@ -147,6 +145,114 @@ def test_wrapper_chama_handler_principal_uma_vez(monkeypatch):
 
     assert resposta == {"status": "processado"}
     assert chamadas == ["inner"]
+
+
+def test_comprador_pago_nao_reentra_em_pix(monkeypatch):
+    chamadas = []
+
+    async def fake_inner(request, background_tasks):
+        chamadas.append("inner")
+        return {"status": "processado"}
+
+    monkeypatch.setattr(state, "webhook_kiwify_com_pix", fake_inner)
+    monkeypatch.setattr(state, "comprador_ja_pago", lambda email: True)
+
+    resposta = asyncio.run(
+        state.webhook_kiwify_com_estado(
+            FakeRequest(payload_order("pix_created", "waiting_payment", "pix")),
+            BackgroundTasks(),
+        )
+    )
+
+    assert resposta["status"] == "ignorado_comprador_ja_pago"
+    assert resposta["status_pagamento"] == "paid"
+    assert resposta["evento_ignorado"] == "pix_pending"
+    assert chamadas == []
+
+
+def test_comprador_pago_nao_reentra_em_boleto(monkeypatch):
+    chamadas = []
+
+    async def fake_inner(request, background_tasks):
+        chamadas.append("inner")
+        return {"status": "processado"}
+
+    monkeypatch.setattr(state, "webhook_kiwify_com_pix", fake_inner)
+    monkeypatch.setattr(state, "comprador_ja_pago", lambda email: True)
+
+    resposta = asyncio.run(
+        state.webhook_kiwify_com_estado(
+            FakeRequest(payload_order("billet_created", "waiting_payment", "boleto")),
+            BackgroundTasks(),
+        )
+    )
+
+    assert resposta["status"] == "ignorado_comprador_ja_pago"
+    assert resposta["evento_ignorado"] == "boleto_pending"
+    assert chamadas == []
+
+
+def test_comprador_pago_nao_reentra_em_abandono(monkeypatch):
+    chamadas = []
+
+    async def fake_inner(request, background_tasks):
+        chamadas.append("inner")
+        return {"status": "processado"}
+
+    monkeypatch.setattr(state, "webhook_kiwify_com_pix", fake_inner)
+    monkeypatch.setattr(state, "comprador_ja_pago", lambda email: True)
+
+    resposta = asyncio.run(
+        state.webhook_kiwify_com_estado(
+            FakeRequest({"cart": {"status": "abandoned", "email": "lead@example.com"}}),
+            BackgroundTasks(),
+        )
+    )
+
+    assert resposta["status"] == "ignorado_comprador_ja_pago"
+    assert resposta["evento_ignorado"] == "abandoned"
+    assert chamadas == []
+
+
+def test_paid_novo_continua_processando_normalmente(monkeypatch):
+    chamadas = []
+
+    async def fake_inner(request, background_tasks):
+        chamadas.append("inner")
+        return {"status": "processado"}
+
+    monkeypatch.setattr(state, "webhook_kiwify_com_pix", fake_inner)
+    monkeypatch.setattr(state, "comprador_ja_pago", lambda email: True)
+    monkeypatch.setattr(state, "convergir_tags_kit", lambda email, estado: True)
+
+    resposta = asyncio.run(
+        state.webhook_kiwify_com_estado(
+            FakeRequest(payload_order("order_approved", "paid", "pix")),
+            BackgroundTasks(),
+        )
+    )
+
+    assert resposta == {"status": "processado"}
+    assert chamadas == ["inner"]
+
+
+def test_falha_guard_paid_forca_503(monkeypatch):
+    monkeypatch.setattr(
+        state,
+        "comprador_ja_pago",
+        lambda email: (_ for _ in ()).throw(RuntimeError("supabase indisponivel")),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            state.webhook_kiwify_com_estado(
+                FakeRequest(payload_order("pix_created", "waiting_payment", "pix")),
+                BackgroundTasks(),
+            )
+        )
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "paid_terminal_guard_unavailable"
 
 
 def test_falha_cleanup_forca_503_para_reentrega(monkeypatch):
