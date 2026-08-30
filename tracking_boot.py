@@ -4,9 +4,9 @@ Importa a aplicacao existente sem alterar main.py e registra apenas as rotas
 novas de tracking automatico. O fluxo com formulario de telefone fica fora do
 bootstrap por decisao de arquitetura: tracking deve ser sem atrito.
 
-No ambiente de teste, substitui POST /webhook por uma versao protegida que
-preserva origem/campanha first-touch. POST /kiwify preserva o processamento
-existente e acrescenta apenas a recuperacao idempotente de PIX.
+POST /kiwify passa por uma camada de convergencia de recuperacoes e, em seguida,
+reutiliza o wrapper existente de PIX/boleto. As rotas internas do reconciliador
+PIX/boleto continuam registradas pelo router original.
 """
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +17,7 @@ from tracking_routes import router as tracking_router
 from tracking_claim_routes import router as tracking_claim_router
 from tracking_safe_webhook import router as tracking_safe_webhook_router
 from recovery_routes import router as recovery_router
+from recovery_state_exclusivity import router as recovery_state_router
 from pix_recovery import router as pix_recovery_router
 
 
@@ -43,6 +44,11 @@ app.router.routes = [
 ]
 
 app.include_router(tracking_safe_webhook_router)
+# Precisa vir antes de pix_recovery_router: ambos expoem POST /kiwify, mas este
+# wrapper e o ponto de entrada oficial e chama o handler PIX/boleto diretamente.
+app.include_router(recovery_state_router)
+# Mantido para registrar /internal/recovery-pix/reconcile e demais rotas
+# internas. O POST /kiwify duplicado fica sombreado pelo router acima.
 app.include_router(pix_recovery_router)
 app.include_router(tracking_router)
 app.include_router(tracking_claim_router)
