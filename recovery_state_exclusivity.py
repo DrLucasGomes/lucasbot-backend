@@ -6,9 +6,9 @@ existentes. Antes do processamento, protege compradores ja pagos contra novos
 eventos de recuperacao. Depois que o processamento principal aceita o webhook,
 remove tags de recuperacao incompatíveis para impedir sequencias concorrentes.
 
-A Kiwify recebe HTTP 503 quando uma verificacao/limpeza critica falha. Assim a
-reentrega do webhook funciona como retry externo, enquanto PIX/boleto continuam
-protegidos pela inbox duravel e pelo reconciliador existentes.
+Para abandono de checkout, a entrada na tag de abandono e garantida de forma
+sincrona antes da limpeza da recuperacao pos-clique. Falha critica retorna 503
+para permitir reentrega do webhook.
 """
 
 import os
@@ -104,7 +104,6 @@ def comprador_ja_pago(email: str) -> bool:
 
 
 def _tags_para_remover(estado: str) -> tuple[str, ...]:
-    """Retorna nomes das env vars cujas tags sao incompatíveis com o estado."""
     if estado == "abandoned":
         return ("TAG_RECUPERACAO_VIDEO_ID",)
     if estado == "pix_pending":
@@ -129,6 +128,40 @@ def _tags_para_remover(estado: str) -> tuple[str, ...]:
     return ()
 
 
+def garantir_tag_estado_kit(email: str, estado: str) -> bool:
+    """Garante sincronicamente a tag de entrada quando o estado exigir."""
+    if estado != "abandoned":
+        return True
+    if not valor_valido(email):
+        return False
+
+    api_secret = _texto(os.getenv("CONVERTKIT_API_SECRET"))
+    tag_id = _texto(os.getenv("TAG_ABANDONO_ID"))
+    if not api_secret or not tag_id:
+        print("[Recovery State] credencial/tag de abandono ausente")
+        return False
+
+    try:
+        resposta = requests.post(
+            f"{KIT_BASE_URL}/tags/{tag_id}/subscribe",
+            json={"api_secret": api_secret, "email": _texto(email)},
+            timeout=10,
+        )
+    except Exception as exc:
+        print(
+            "[Recovery State] abandoned subscribe falhou "
+            f"erro={type(exc).__name__}"
+        )
+        return False
+
+    sucesso = resposta.status_code in (200, 201, 204)
+    print(
+        "[Recovery State] operation=subscribe "
+        f"estado={estado} tag_id={tag_id} status_http={resposta.status_code}"
+    )
+    return sucesso
+
+
 def convergir_tags_kit(email: str, estado: str) -> bool:
     """Remove todas as recuperacoes incompatíveis configuradas para o estado."""
     if not valor_valido(email):
@@ -138,23 +171,21 @@ def convergir_tags_kit(email: str, estado: str) -> bool:
     if not envs:
         return True
 
-    tags = []
-    for env_name in envs:
-        tag_id = _texto(os.getenv(env_name))
-        if tag_id and tag_id not in tags:
-            tags.append(tag_id)
-
-    if not tags:
-        return True
-
     api_secret = _texto(os.getenv("CONVERTKIT_API_SECRET"))
     if not api_secret:
         print("[Recovery State] CONVERTKIT_API_SECRET ausente")
         return False
 
-    payload = {"api_secret": api_secret, "email": _texto(email)}
-    sucesso_total = True
+    tags = []
+    for env_name in envs:
+        tag_id = _texto(os.getenv(env_name))
+        if not tag_id:
+            print(f"[Recovery State] {env_name} ausente")
+            return False
+        if tag_id not in tags:
+            tags.append(tag_id)
 
+    payload = {"api_secret": api_secret, "email": _texto(email)}
     for tag_id in tags:
         try:
             resposta = requests.post(
@@ -167,15 +198,16 @@ def convergir_tags_kit(email: str, estado: str) -> bool:
                 "[Recovery State] operation=unsubscribe "
                 f"estado={estado} tag_id={tag_id} status_http={resposta.status_code}"
             )
-            sucesso_total = sucesso_total and sucesso
+            if not sucesso:
+                return False
         except Exception as exc:
             print(
                 "[Recovery State] unsubscribe falhou "
                 f"estado={estado} tag_id={tag_id} erro={type(exc).__name__}"
             )
-            sucesso_total = False
+            return False
 
-    return sucesso_total
+    return True
 
 
 @router.post("/kiwify")
@@ -191,9 +223,6 @@ async def webhook_kiwify_com_estado(
     estado = classificar_estado_recuperacao(dados)
     email = _email(dados)
 
-    # paid e terminal: se um comprador antigo voltar ao checkout usando o mesmo
-    # email, abandono/PIX/boleto novos nao podem rebaixar o Supabase nem reativar
-    # qualquer recuperacao. A guarda roda ANTES do handler existente.
     if estado in ESTADOS_RECUPERACAO and email:
         try:
             if comprador_ja_pago(email):
@@ -217,15 +246,16 @@ async def webhook_kiwify_com_estado(
                 detail="paid_terminal_guard_unavailable",
             )
 
-    # O Request do Starlette faz cache de .json(), portanto o wrapper existente
-    # pode ler o mesmo corpo sem consumir o stream pela segunda vez.
     resposta = await webhook_kiwify_com_pix(request, background_tasks)
 
-    if not estado:
+    if not estado or not email:
         return resposta
 
-    if not email:
-        return resposta
+    if not garantir_tag_estado_kit(email, estado):
+        raise HTTPException(
+            status_code=503,
+            detail="recovery_state_entry_not_converged",
+        )
 
     if not convergir_tags_kit(email, estado):
         raise HTTPException(
