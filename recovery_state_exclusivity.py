@@ -6,9 +6,10 @@ existentes. Antes do processamento, protege compradores ja pagos contra novos
 eventos de recuperacao. Depois que o processamento principal aceita o webhook,
 remove tags de recuperacao incompatíveis para impedir sequencias concorrentes.
 
-A Kiwify recebe HTTP 503 quando uma verificacao/limpeza critica falha. Assim a
-reentrega do webhook funciona como retry externo, enquanto PIX/boleto continuam
-protegidos pela inbox duravel e pelo reconciliador existentes.
+Para abandono de checkout, a transicao no Kit e feita de forma sincrona e
+atomica do ponto de vista do webhook: garante a tag de abandono e remove a tag
+de recuperacao pos-clique. Se qualquer etapa critica falhar, responde 503 para
+a Kiwify reenviar o evento.
 """
 
 import os
@@ -129,10 +130,54 @@ def _tags_para_remover(estado: str) -> tuple[str, ...]:
     return ()
 
 
+def _tag_para_aplicar(estado: str) -> str:
+    if estado == "abandoned":
+        return "TAG_ABANDONO_ID"
+    return ""
+
+
 def convergir_tags_kit(email: str, estado: str) -> bool:
-    """Remove todas as recuperacoes incompatíveis configuradas para o estado."""
+    """Converge o Kit para um unico estado de recuperacao coerente."""
     if not valor_valido(email):
         return False
+
+    api_secret = _texto(os.getenv("CONVERTKIT_API_SECRET"))
+    if not api_secret:
+        print("[Recovery State] CONVERTKIT_API_SECRET ausente")
+        return False
+
+    payload = {"api_secret": api_secret, "email": _texto(email)}
+
+    # No abandono, nao dependemos mais do background task do handler legado:
+    # garantimos a entrada na trilha correta antes de remover a trilha anterior.
+    env_aplicar = _tag_para_aplicar(estado)
+    if env_aplicar:
+        tag_aplicar = _texto(os.getenv(env_aplicar))
+        if not tag_aplicar:
+            print(f"[Recovery State] {env_aplicar} ausente")
+            return False
+        try:
+            resposta = requests.post(
+                f"{KIT_BASE_URL}/tags/{tag_aplicar}/subscribe",
+                json=payload,
+                timeout=10,
+            )
+            if resposta.status_code not in (200, 201, 204):
+                print(
+                    "[Recovery State] subscribe falhou "
+                    f"estado={estado} tag_id={tag_aplicar} status_http={resposta.status_code}"
+                )
+                return False
+            print(
+                "[Recovery State] operation=subscribe "
+                f"estado={estado} tag_id={tag_aplicar} status_http={resposta.status_code}"
+            )
+        except Exception as exc:
+            print(
+                "[Recovery State] subscribe falhou "
+                f"estado={estado} tag_id={tag_aplicar} erro={type(exc).__name__}"
+            )
+            return False
 
     envs = _tags_para_remover(estado)
     if not envs:
@@ -141,19 +186,13 @@ def convergir_tags_kit(email: str, estado: str) -> bool:
     tags = []
     for env_name in envs:
         tag_id = _texto(os.getenv(env_name))
-        if tag_id and tag_id not in tags:
+        if not tag_id:
+            # Antes isso virava sucesso silencioso. Para transicoes criticas,
+            # configuracao ausente deve falhar para podermos corrigir/reentregar.
+            print(f"[Recovery State] {env_name} ausente")
+            return False
+        if tag_id not in tags:
             tags.append(tag_id)
-
-    if not tags:
-        return True
-
-    api_secret = _texto(os.getenv("CONVERTKIT_API_SECRET"))
-    if not api_secret:
-        print("[Recovery State] CONVERTKIT_API_SECRET ausente")
-        return False
-
-    payload = {"api_secret": api_secret, "email": _texto(email)}
-    sucesso_total = True
 
     for tag_id in tags:
         try:
@@ -167,15 +206,16 @@ def convergir_tags_kit(email: str, estado: str) -> bool:
                 "[Recovery State] operation=unsubscribe "
                 f"estado={estado} tag_id={tag_id} status_http={resposta.status_code}"
             )
-            sucesso_total = sucesso_total and sucesso
+            if not sucesso:
+                return False
         except Exception as exc:
             print(
                 "[Recovery State] unsubscribe falhou "
                 f"estado={estado} tag_id={tag_id} erro={type(exc).__name__}"
             )
-            sucesso_total = False
+            return False
 
-    return sucesso_total
+    return True
 
 
 @router.post("/kiwify")
@@ -221,10 +261,7 @@ async def webhook_kiwify_com_estado(
     # pode ler o mesmo corpo sem consumir o stream pela segunda vez.
     resposta = await webhook_kiwify_com_pix(request, background_tasks)
 
-    if not estado:
-        return resposta
-
-    if not email:
+    if not estado or not email:
         return resposta
 
     if not convergir_tags_kit(email, estado):
