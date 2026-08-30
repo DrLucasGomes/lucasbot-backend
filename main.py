@@ -445,9 +445,13 @@ def buscar_lead_por_campo(campo: str, valor: str):
 
 
 def buscar_lead_existente(manychat_id=None, telefone=None, email=None):
+    """Resolve identidade priorizando o email, que e a chave operacional do Kit."""
     lead = None
 
-    if manychat_id_valido(manychat_id):
+    if email:
+        lead = buscar_lead_por_campo("email", str(email).strip())
+
+    if not lead and manychat_id_valido(manychat_id):
         lead = buscar_lead_por_campo("manychat_id", str(manychat_id).strip())
 
     if not lead and telefone:
@@ -458,9 +462,6 @@ def buscar_lead_existente(manychat_id=None, telefone=None, email=None):
 
     if not lead and telefone:
         lead = buscar_lead_por_campo("telefone_checkout_kiwify", telefone)
-
-    if not lead and email:
-        lead = buscar_lead_por_campo("email", email)
 
     return lead
 
