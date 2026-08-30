@@ -2,10 +2,11 @@
 
 Este wrapper fica acima do handler Kiwify existente. Ele nao substitui a
 persistencia, tracking, buyer tag, PIX/boleto ledger ou reconciliacao ja
-existentes. Depois que o processamento principal aceita o webhook, remove tags
-de recuperacao incompatíveis para impedir sequencias concorrentes no Kit.
+existentes. Antes do processamento, protege compradores ja pagos contra novos
+eventos de recuperacao. Depois que o processamento principal aceita o webhook,
+remove tags de recuperacao incompatíveis para impedir sequencias concorrentes.
 
-A Kiwify recebe HTTP 503 quando uma remocao configurada falha. Assim a
+A Kiwify recebe HTTP 503 quando uma verificacao/limpeza critica falha. Assim a
 reentrega do webhook funciona como retry externo, enquanto PIX/boleto continuam
 protegidos pela inbox duravel e pelo reconciliador existentes.
 """
@@ -15,12 +16,18 @@ import os
 import requests
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
-from main import STATUS_ABANDONO, STATUS_PAGOS, valor_valido
+from main import (
+    STATUS_ABANDONO,
+    STATUS_PAGOS,
+    buscar_lead_existente,
+    valor_valido,
+)
 from pix_recovery import webhook_kiwify_com_pix
 
 
 router = APIRouter(tags=["kiwify-recovery-state"])
 KIT_BASE_URL = "https://api.convertkit.com/v3"
+ESTADOS_RECUPERACAO = {"abandoned", "pix_pending", "boleto_pending"}
 
 
 def _texto(valor) -> str:
@@ -83,6 +90,19 @@ def classificar_estado_recuperacao(dados: dict) -> str:
     return ""
 
 
+def comprador_ja_pago(email: str) -> bool:
+    """Consulta a verdade persistida antes de aceitar um novo estado de recuperacao."""
+    if not valor_valido(email):
+        return False
+
+    lead = buscar_lead_existente(email=_texto(email))
+    if not isinstance(lead, dict):
+        return False
+
+    status_atual = _texto(lead.get("status_pagamento")).lower()
+    return status_atual in STATUS_PAGOS
+
+
 def _tags_para_remover(estado: str) -> tuple[str, ...]:
     """Retorna nomes das env vars cujas tags sao incompatíveis com o estado."""
     if estado == "abandoned":
@@ -124,7 +144,6 @@ def convergir_tags_kit(email: str, estado: str) -> bool:
         if tag_id and tag_id not in tags:
             tags.append(tag_id)
 
-    # Nenhuma tag configurada para esse estado: nao ha efeito remoto a executar.
     if not tags:
         return True
 
@@ -163,28 +182,52 @@ def convergir_tags_kit(email: str, estado: str) -> bool:
 async def webhook_kiwify_com_estado(
     request: Request, background_tasks: BackgroundTasks
 ):
-    """Executa o handler oficial uma vez e depois converge recuperacoes no Kit."""
+    """Protege paid terminal, executa o handler oficial e converge o Kit."""
     try:
         dados = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="JSON invalido")
 
+    estado = classificar_estado_recuperacao(dados)
+    email = _email(dados)
+
+    # paid e terminal: se um comprador antigo voltar ao checkout usando o mesmo
+    # email, abandono/PIX/boleto novos nao podem rebaixar o Supabase nem reativar
+    # qualquer recuperacao. A guarda roda ANTES do handler existente.
+    if estado in ESTADOS_RECUPERACAO and email:
+        try:
+            if comprador_ja_pago(email):
+                print(
+                    "[Recovery State] evento ignorado para comprador pago "
+                    f"estado={estado} email={email}"
+                )
+                return {
+                    "status": "ignorado_comprador_ja_pago",
+                    "status_pagamento": "paid",
+                    "email": email,
+                    "evento_ignorado": estado,
+                }
+        except Exception as exc:
+            print(
+                "[Recovery State] falha ao verificar paid terminal "
+                f"estado={estado} erro={type(exc).__name__}"
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="paid_terminal_guard_unavailable",
+            )
+
     # O Request do Starlette faz cache de .json(), portanto o wrapper existente
     # pode ler o mesmo corpo sem consumir o stream pela segunda vez.
     resposta = await webhook_kiwify_com_pix(request, background_tasks)
 
-    estado = classificar_estado_recuperacao(dados)
     if not estado:
         return resposta
 
-    email = _email(dados)
     if not email:
-        # O handler principal ja decide como responder a payload sem identidade.
         return resposta
 
     if not convergir_tags_kit(email, estado):
-        # Forca reentrega Kiwify. O processamento principal e os jobs PIX/boleto
-        # sao idempotentes/deduplicados, entao o retry converge sem venda dupla.
         raise HTTPException(
             status_code=503,
             detail="recovery_state_not_converged",
