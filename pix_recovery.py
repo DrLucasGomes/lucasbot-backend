@@ -2,7 +2,8 @@ import hmac
 import os
 import threading
 import time
-from urllib.parse import quote
+from datetime import datetime, timezone
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 import requests
@@ -14,7 +15,7 @@ from kit_utils import (
     metadados_resposta_subscribe,
     primeiro_nome as _primeiro_nome,
 )
-from main import STATUS_PAGOS, URL, obter_headers_supabase, webhook_kiwify
+from main import STATUS_PAGOS, URL, obter_headers_supabase, valor_valido, webhook_kiwify
 
 
 router = APIRouter(tags=["kiwify-pix-recovery"])
@@ -52,6 +53,19 @@ def _ordem(dados):
 
 def _texto(valor):
     return str(valor or "").strip()
+
+
+def _normalizar_boleto_link(valor) -> str:
+    texto = _texto(valor)
+    if not texto:
+        return ""
+    try:
+        parsed = urlparse(texto)
+    except Exception:
+        return ""
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        return ""
+    return texto
 
 
 def _obter_oauth_token_kiwify() -> str:
@@ -161,6 +175,9 @@ def confirmar_venda_kiwify(
         or _primeiro_nome(customer.get("name"))
         or _primeiro_nome(customer.get("full_name"))
     )
+    boleto_url = _normalizar_boleto_link(
+        venda.get("boleto_url") or venda.get("boleto_URL")
+    )
     if not identity_ok:
         return {}
 
@@ -171,13 +188,16 @@ def confirmar_venda_kiwify(
     if payment_method_esperado and payment_method != _texto(payment_method_esperado).lower():
         return {}
 
-    return {
+    resultado = {
         "id": order_id,
         "status": status,
         "payment_method": payment_method,
         "email": email,
         "first_name": first_name,
     }
+    if payment_method == "boleto" and boleto_url:
+        resultado["boleto_url"] = boleto_url
+    return resultado
 
 
 def _evento_pix_criado(dados) -> bool:
@@ -185,6 +205,16 @@ def _evento_pix_criado(dados) -> bool:
     return (
         _texto(ordem.get("webhook_event_type")).lower() == "pix_created"
         and _texto(ordem.get("payment_method")).lower() == "pix"
+        and _texto(ordem.get("order_status")).lower() == "waiting_payment"
+        and bool(_texto(ordem.get("order_id")))
+    )
+
+
+def _evento_boleto_criado(dados) -> bool:
+    ordem = _ordem(dados)
+    return (
+        _texto(ordem.get("webhook_event_type")).lower() == "billet_created"
+        and _texto(ordem.get("payment_method")).lower() == "boleto"
         and _texto(ordem.get("order_status")).lower() == "waiting_payment"
         and bool(_texto(ordem.get("order_id")))
     )
@@ -207,6 +237,29 @@ def _dados_pix(dados):
     }
 
 
+def _parse_boleto_expiry_date(valor) -> str:
+    texto = _texto(valor)
+    if not texto:
+        return ""
+    try:
+        data = datetime.strptime(texto, "%d/%m/%Y").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return ""
+    return data.isoformat()
+
+
+def _dados_boleto(dados):
+    ordem = _ordem(dados)
+    cliente = ordem.get("Customer") or ordem.get("customer") or {}
+    if not isinstance(cliente, dict):
+        cliente = {}
+    return {
+        "order_id": _texto(ordem.get("order_id")),
+        "email": _texto(cliente.get("email") or cliente.get("Email")),
+        "expires_at": _parse_boleto_expiry_date(ordem.get("boleto_expiry_date")),
+    }
+
+
 def _rpc_bool(nome: str, payload: dict) -> bool:
     resposta = requests.post(
         f"{URL}/rest/v1/rpc/{nome}",
@@ -222,10 +275,15 @@ def _rpc_bool(nome: str, payload: dict) -> bool:
         return False
 
 
-def enfileirar_job_pix(order_id: str, event_type: str) -> bool:
+def enfileirar_job_pix(
+    order_id: str, event_type: str, expires_at: str = ""
+) -> bool:
+    payload = {"p_order_id": order_id, "p_event_type": event_type}
+    if expires_at:
+        payload["p_expires_at"] = expires_at
     return _rpc_bool(
         "recovery_pix_job_enqueue",
-        {"p_order_id": order_id, "p_event_type": event_type},
+        payload,
     )
 
 
@@ -275,7 +333,7 @@ def listar_jobs_pix_recuperaveis(limit: int = PIX_JOB_RECONCILE_LIMIT) -> list[d
             f"{URL}/rest/v1/{PIX_JOB_TABLE}",
             params={
                 "status": "in.(pending,retryable,processing)",
-                "select": "order_id,event_type",
+                "select": "order_id,event_type,expires_at",
                 "order": "updated_at.asc",
                 "limit": str(max(1, min(int(limit), 100))),
             },
@@ -296,24 +354,42 @@ def listar_jobs_pix_recuperaveis(limit: int = PIX_JOB_RECONCILE_LIMIT) -> list[d
     if not isinstance(jobs, list):
         print("[PIX Job] Resposta invalida na reconciliacao: formato inesperado")
         return []
-    return [
-        {"order_id": _texto(job.get("order_id")), "event_type": _texto(job.get("event_type"))}
-        for job in jobs
-        if isinstance(job, dict)
-        and _texto(job.get("order_id"))
-        and _texto(job.get("event_type")) in {"pix_created", "paid"}
-    ]
+    normalizados = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        order_id = _texto(job.get("order_id"))
+        event_type = _texto(job.get("event_type"))
+        if not order_id or event_type not in {"pix_created", "billet_created", "paid"}:
+            continue
+        normalizado = {"order_id": order_id, "event_type": event_type}
+        expires_at = _texto(job.get("expires_at"))
+        if expires_at:
+            normalizado["expires_at"] = expires_at
+        normalizados.append(normalizado)
+    return normalizados
 
 
-def adquirir_processamento(order_id: str, email: str, attempt_token: str) -> bool:
+def adquirir_processamento(
+    order_id: str,
+    email: str,
+    attempt_token: str,
+    payment_method: str | None = None,
+    expires_at: str | None = None,
+) -> bool:
+    payload = {
+        "p_order_id": order_id,
+        "p_email": email,
+        "p_attempt_token": attempt_token,
+        "p_stale_minutes": PROCESSING_STALE_MINUTES,
+    }
+    if payment_method:
+        payload["p_payment_method"] = payment_method
+    if expires_at:
+        payload["p_expires_at"] = expires_at
     return _rpc_bool(
         "recovery_pix_acquire",
-        {
-            "p_order_id": order_id,
-            "p_email": email,
-            "p_attempt_token": attempt_token,
-            "p_stale_minutes": PROCESSING_STALE_MINUTES,
-        },
+        payload,
     )
 
 
@@ -333,6 +409,19 @@ def persistir_cancelamento(order_id: str, email: str | None) -> bool:
     return _rpc_bool(
         "recovery_pix_cancel",
         {"p_order_id": order_id, "p_email": email or None},
+    )
+
+
+def persistir_cancelamento_metodo(
+    order_id: str, email: str | None, payment_method: str
+) -> bool:
+    return _rpc_bool(
+        "recovery_pix_cancel",
+        {
+            "p_order_id": order_id,
+            "p_email": email or None,
+            "p_payment_method": payment_method,
+        },
     )
 
 
@@ -358,7 +447,7 @@ def buscar_ledger(order_id: str) -> dict:
         f"{URL}/rest/v1/{PIX_TABLE}",
         params={
             "order_id": f"eq.{order_id}",
-            "select": "email,status,attempt_token,subscribe_attempted",
+            "select": "email,status,attempt_token,subscribe_attempted,payment_method,expires_at",
             "limit": "1",
         },
         headers=obter_headers_supabase(),
@@ -417,6 +506,32 @@ def _alterar_tag_kit(
     return tag_success
 
 
+def _alterar_tag_boleto_kit(
+    email: str,
+    acao: str,
+    first_name: str = "",
+    boleto_link: str = "",
+) -> bool:
+    tag_id = _texto(os.getenv("TAG_BOLETO_ID"))
+    api_secret = _texto(os.getenv("CONVERTKIT_API_SECRET"))
+    if not tag_id or not email or not api_secret or acao not in {"subscribe", "unsubscribe"}:
+        return False
+
+    payload = {"api_secret": api_secret, "email": email}
+    first_name_normalizado = (
+        _primeiro_nome(first_name) if valor_valido(first_name) else ""
+    )
+    link_normalizado = _normalizar_boleto_link(boleto_link)
+    if acao == "subscribe" and first_name_normalizado:
+        payload["first_name"] = first_name_normalizado
+    if acao == "subscribe" and link_normalizado:
+        payload["fields"] = {"boleto_link": link_normalizado}
+    resposta = requests.post(
+        f"{KIT_BASE_URL}/tags/{tag_id}/{acao}", json=payload, timeout=5
+    )
+    return resposta.status_code in (200, 201, 204)
+
+
 def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
     ledger = buscar_ledger(order_id)
     status = _texto(ledger.get("status")).lower()
@@ -446,9 +561,39 @@ def reconciliar_cancelamento(order_id: str, email_preferido: str = "") -> bool:
     return confirmar_cancelamento(order_id)
 
 
+def reconciliar_cancelamento_boleto(order_id: str, email_preferido: str = "") -> bool:
+    ledger = buscar_ledger(order_id)
+    status = _texto(ledger.get("status")).lower()
+    if status == "cancelled":
+        return True
+    if status != "cancelled_pending_unsubscribe":
+        return False
+    email = _texto(email_preferido) or _texto(ledger.get("email"))
+    if not email:
+        return False
+    try:
+        removido = _alterar_tag_boleto_kit(email, "unsubscribe")
+    except Exception as exc:
+        print(f"[Boleto Recovery] Falha no unsubscribe: {type(exc).__name__}")
+        return False
+    if not removido:
+        print("[Boleto Recovery] Unsubscribe permaneceu pendente")
+        return False
+    if bool(ledger.get("subscribe_attempted")):
+        return True
+    return confirmar_cancelamento(order_id)
+
+
 def compensar_subscribe_concorrente(order_id: str, email: str, attempt_token: str) -> bool:
     reabrir_cancelamento(order_id, attempt_token)
     return reconciliar_cancelamento(order_id, email)
+
+
+def compensar_subscribe_boleto_concorrente(
+    order_id: str, email: str, attempt_token: str
+) -> bool:
+    reabrir_cancelamento(order_id, attempt_token)
+    return reconciliar_cancelamento_boleto(order_id, email)
 
 
 def processar_pix_criado(dados):
@@ -477,7 +622,6 @@ def processar_pix_criado(dados):
     if not email:
         return False
     first_name = _primeiro_nome(venda.get("first_name"))
-
     attempt_token = str(uuid4())
 
     try:
@@ -522,6 +666,81 @@ def processar_pix_criado(dados):
         return False
 
 
+def processar_boleto_criado(dados, expires_at_override: str = ""):
+    if not _evento_boleto_criado(dados):
+        return False
+
+    info = _dados_boleto(dados)
+    order_id = info["order_id"]
+    expires_at = _texto(expires_at_override) or info["expires_at"]
+    webhook_ordem = _ordem(dados)
+    webhook_link = _normalizar_boleto_link(
+        webhook_ordem.get("boleto_url") or webhook_ordem.get("boleto_URL")
+    )
+    if not order_id:
+        return False
+    venda = confirmar_venda_kiwify(
+        order_id,
+        statuses_aceitos={"waiting_payment"},
+        payment_method_esperado="boleto",
+    )
+    if not venda:
+        ledger = buscar_ledger(order_id)
+        if _texto(ledger.get("status")).lower() in {
+            "cancelled",
+            "cancelled_pending_unsubscribe",
+        }:
+            return True
+        return False
+    email = _texto(venda.get("email"))
+    boleto_link = _normalizar_boleto_link(venda.get("boleto_url")) or webhook_link
+    if not email or not boleto_link:
+        return False
+    first_name = _primeiro_nome(venda.get("first_name"))
+    attempt_token = str(uuid4())
+
+    try:
+        if not adquirir_processamento(
+            order_id, email, attempt_token, "boleto", expires_at or None
+        ):
+            ledger = buscar_ledger(order_id)
+            if _texto(ledger.get("status")).lower() == "completed":
+                return True
+            return reconciliar_cancelamento_boleto(order_id, email)
+        if not transicionar(order_id, attempt_token, "processing", "subscribing"):
+            return reconciliar_cancelamento_boleto(order_id, email)
+        try:
+            sucesso = _alterar_tag_boleto_kit(
+                email, "subscribe", first_name, boleto_link
+            )
+        except Exception as exc:
+            print(f"[Boleto Recovery] Resultado ambiguo do subscribe: {type(exc).__name__}")
+            if compensar_subscribe_boleto_concorrente(order_id, email, attempt_token):
+                return True
+            transicionar(order_id, attempt_token, "subscribing", "failed")
+            return False
+        if not sucesso:
+            if compensar_subscribe_boleto_concorrente(order_id, email, attempt_token):
+                return True
+            transicionar(order_id, attempt_token, "subscribing", "failed")
+            return False
+        if not transicionar(order_id, attempt_token, "subscribing", "completed"):
+            return compensar_subscribe_boleto_concorrente(
+                order_id, email, attempt_token
+            )
+        return True
+    except Exception as exc:
+        print(f"[Boleto Recovery] Falha ao iniciar recovery: {type(exc).__name__}")
+        try:
+            if not compensar_subscribe_boleto_concorrente(
+                order_id, email, attempt_token
+            ):
+                transicionar(order_id, attempt_token, "subscribing", "failed")
+        except Exception:
+            pass
+        return False
+
+
 def cancelar_pix_por_pagamento(dados):
     if not _evento_pago(dados):
         return False
@@ -535,8 +754,13 @@ def cancelar_pix_por_pagamento(dados):
     if not venda:
         return False
     email = _texto(venda.get("email"))
+    payment_method = _texto(venda.get("payment_method")).lower()
 
     try:
+        if payment_method == "boleto":
+            if not persistir_cancelamento_metodo(order_id, email, "boleto"):
+                return False
+            return reconciliar_cancelamento_boleto(order_id, email)
         if not persistir_cancelamento(order_id, email):
             return False
 
@@ -546,7 +770,7 @@ def cancelar_pix_por_pagamento(dados):
         return False
 
 
-def _payload_minimo_job(order_id: str, event_type: str) -> dict:
+def _payload_minimo_job(order_id: str, event_type: str, expires_at: str = "") -> dict:
     if event_type == "pix_created":
         return {
             "order_id": order_id,
@@ -560,14 +784,28 @@ def _payload_minimo_job(order_id: str, event_type: str) -> dict:
             "webhook_event_type": "order_approved",
             "order_status": "paid",
         }
+    if event_type == "billet_created":
+        payload = {
+            "order_id": order_id,
+            "webhook_event_type": "billet_created",
+            "payment_method": "boleto",
+            "order_status": "waiting_payment",
+        }
+        if expires_at:
+            try:
+                data = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                payload["boleto_expiry_date"] = data.strftime("%d/%m/%Y")
+            except (TypeError, ValueError):
+                pass
+        return payload
     return {}
 
 
-def processar_job_pix(order_id: str, event_type: str) -> bool:
+def processar_job_pix(order_id: str, event_type: str, expires_at: str = "") -> bool:
     """Adquire um job durável e finaliza somente sob o mesmo fencing token."""
     order_id = _texto(order_id)
     event_type = _texto(event_type)
-    if not order_id or event_type not in {"pix_created", "paid"}:
+    if not order_id or event_type not in {"pix_created", "billet_created", "paid"}:
         return False
 
     attempt_token = str(uuid4())
@@ -575,9 +813,11 @@ def processar_job_pix(order_id: str, event_type: str) -> bool:
         return False
 
     try:
-        payload = _payload_minimo_job(order_id, event_type)
+        payload = _payload_minimo_job(order_id, event_type, expires_at)
         if event_type == "pix_created":
             sucesso = processar_pix_criado(payload)
+        elif event_type == "billet_created":
+            sucesso = processar_boleto_criado(payload, expires_at)
         else:
             sucesso = cancelar_pix_por_pagamento(payload)
     except Exception:
@@ -605,7 +845,13 @@ def reconciliar_jobs_pix(limit: int = PIX_JOB_RECONCILE_LIMIT) -> dict:
     concluidos = 0
     for job in jobs:
         tentados += 1
-        if processar_job_pix(job["order_id"], job["event_type"]):
+        if job.get("expires_at"):
+            sucesso = processar_job_pix(
+                job["order_id"], job["event_type"], job["expires_at"]
+            )
+        else:
+            sucesso = processar_job_pix(job["order_id"], job["event_type"])
+        if sucesso:
             concluidos += 1
         # Um retorno False também cobre disputa perdida. Não expomos IDs.
     return {"candidates": len(jobs), "completed": concluidos, "attempted": tentados}
@@ -630,6 +876,7 @@ async def reconciliar_jobs_pix_endpoint(request: Request):
 async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundTasks):
     dados = None
     eh_pix = False
+    eh_boleto = False
     eh_pago = False
 
     # Classifica antes do handler original. Starlette reutiliza o corpo para JSON valido.
@@ -638,15 +885,28 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
         dados = await request.json()
         if isinstance(dados, dict):
             eh_pix = _evento_pix_criado(dados)
+            eh_boleto = _evento_boleto_criado(dados)
             eh_pago = _evento_pago(dados)
     except Exception:
         pass
 
-    event_type = "pix_created" if eh_pix else "paid" if eh_pago else ""
+    event_type = (
+        "pix_created"
+        if eh_pix
+        else "billet_created"
+        if eh_boleto
+        else "paid"
+        if eh_pago
+        else ""
+    )
     order_id = _dados_pix(dados).get("order_id") if event_type else ""
+    expires_at = _dados_boleto(dados).get("expires_at", "") if eh_boleto else ""
     job_persistido = True
     if event_type:
-        job_persistido = enfileirar_job_pix(order_id, event_type)
+        if eh_boleto and expires_at:
+            job_persistido = enfileirar_job_pix(order_id, event_type, expires_at)
+        else:
+            job_persistido = enfileirar_job_pix(order_id, event_type)
 
     resposta = await webhook_kiwify(request, background_tasks)
 
@@ -658,7 +918,11 @@ async def webhook_kiwify_com_pix(request: Request, background_tasks: BackgroundT
         return resposta
 
     try:
-        if eh_pix:
+        if eh_boleto and expires_at:
+            background_tasks.add_task(
+                processar_job_pix, order_id, event_type, expires_at
+            )
+        elif eh_pix or eh_boleto:
             background_tasks.add_task(processar_job_pix, order_id, event_type)
         elif eh_pago:
             background_tasks.add_task(processar_job_pix, order_id, event_type)
