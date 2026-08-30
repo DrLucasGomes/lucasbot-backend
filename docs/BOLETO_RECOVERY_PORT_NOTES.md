@@ -1,0 +1,1 @@
+Temporary note: boleto recovery branch was validated in staging and still needs to be ported/merged into main after the production paid-boleto E2E exposed that main does not yet include the boleto-specific recovery worker. This file can be removed during the final port.
