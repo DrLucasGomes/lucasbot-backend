@@ -30,6 +30,15 @@ KIT_BASE_URL = "https://api.convertkit.com/v3"
 ESTADOS_RECUPERACAO = {"abandoned", "pix_pending", "boleto_pending"}
 
 
+def _log(message: str) -> None:
+    print(f"[Recovery State] {message}", flush=True)
+
+
+def _resumo_resposta(resposta) -> str:
+    texto = (getattr(resposta, "text", "") or "").replace("\n", " ").strip()
+    return texto[:500]
+
+
 def _texto(valor) -> str:
     return str(valor or "").strip()
 
@@ -138,9 +147,10 @@ def garantir_tag_estado_kit(email: str, estado: str) -> bool:
     api_secret = _texto(os.getenv("CONVERTKIT_API_SECRET"))
     tag_id = _texto(os.getenv("TAG_ABANDONO_ID"))
     if not api_secret or not tag_id:
-        print("[Recovery State] credencial/tag de abandono ausente")
+        _log("credencial/tag de abandono ausente")
         return False
 
+    _log(f"operation=subscribe START estado={estado} email={email} tag_id={tag_id}")
     try:
         resposta = requests.post(
             f"{KIT_BASE_URL}/tags/{tag_id}/subscribe",
@@ -148,16 +158,13 @@ def garantir_tag_estado_kit(email: str, estado: str) -> bool:
             timeout=10,
         )
     except Exception as exc:
-        print(
-            "[Recovery State] abandoned subscribe falhou "
-            f"erro={type(exc).__name__}"
-        )
+        _log(f"operation=subscribe ERROR estado={estado} tag_id={tag_id} erro={type(exc).__name__}")
         return False
 
     sucesso = resposta.status_code in (200, 201, 204)
-    print(
-        "[Recovery State] operation=subscribe "
-        f"estado={estado} tag_id={tag_id} status_http={resposta.status_code}"
+    _log(
+        f"operation=subscribe END estado={estado} email={email} tag_id={tag_id} "
+        f"status_http={resposta.status_code} body={_resumo_resposta(resposta)!r}"
     )
     return sucesso
 
@@ -173,20 +180,21 @@ def convergir_tags_kit(email: str, estado: str) -> bool:
 
     api_secret = _texto(os.getenv("CONVERTKIT_API_SECRET"))
     if not api_secret:
-        print("[Recovery State] CONVERTKIT_API_SECRET ausente")
+        _log("CONVERTKIT_API_SECRET ausente")
         return False
 
     tags = []
     for env_name in envs:
         tag_id = _texto(os.getenv(env_name))
         if not tag_id:
-            print(f"[Recovery State] {env_name} ausente")
+            _log(f"{env_name} ausente")
             return False
         if tag_id not in tags:
             tags.append(tag_id)
 
     payload = {"api_secret": api_secret, "email": _texto(email)}
     for tag_id in tags:
+        _log(f"operation=unsubscribe START estado={estado} email={email} tag_id={tag_id}")
         try:
             resposta = requests.post(
                 f"{KIT_BASE_URL}/tags/{tag_id}/unsubscribe",
@@ -194,17 +202,14 @@ def convergir_tags_kit(email: str, estado: str) -> bool:
                 timeout=10,
             )
             sucesso = resposta.status_code in (200, 201, 204)
-            print(
-                "[Recovery State] operation=unsubscribe "
-                f"estado={estado} tag_id={tag_id} status_http={resposta.status_code}"
+            _log(
+                f"operation=unsubscribe END estado={estado} email={email} tag_id={tag_id} "
+                f"status_http={resposta.status_code} body={_resumo_resposta(resposta)!r}"
             )
             if not sucesso:
                 return False
         except Exception as exc:
-            print(
-                "[Recovery State] unsubscribe falhou "
-                f"estado={estado} tag_id={tag_id} erro={type(exc).__name__}"
-            )
+            _log(f"operation=unsubscribe ERROR estado={estado} email={email} tag_id={tag_id} erro={type(exc).__name__}")
             return False
 
     return True
@@ -222,14 +227,16 @@ async def webhook_kiwify_com_estado(
 
     estado = classificar_estado_recuperacao(dados)
     email = _email(dados)
+    _log(
+        f"ENTRY path=/kiwify estado={estado or 'none'} email={email or 'none'} "
+        f"tag_video={_texto(os.getenv('TAG_RECUPERACAO_VIDEO_ID')) or 'missing'} "
+        f"tag_abandono={_texto(os.getenv('TAG_ABANDONO_ID')) or 'missing'}"
+    )
 
     if estado in ESTADOS_RECUPERACAO and email:
         try:
             if comprador_ja_pago(email):
-                print(
-                    "[Recovery State] evento ignorado para comprador pago "
-                    f"estado={estado} email={email}"
-                )
+                _log(f"evento ignorado para comprador pago estado={estado} email={email}")
                 return {
                     "status": "ignorado_comprador_ja_pago",
                     "status_pagamento": "paid",
@@ -237,10 +244,7 @@ async def webhook_kiwify_com_estado(
                     "evento_ignorado": estado,
                 }
         except Exception as exc:
-            print(
-                "[Recovery State] falha ao verificar paid terminal "
-                f"estado={estado} erro={type(exc).__name__}"
-            )
+            _log(f"falha ao verificar paid terminal estado={estado} erro={type(exc).__name__}")
             raise HTTPException(
                 status_code=503,
                 detail="paid_terminal_guard_unavailable",
@@ -249,18 +253,22 @@ async def webhook_kiwify_com_estado(
     resposta = await webhook_kiwify_com_pix(request, background_tasks)
 
     if not estado or not email:
+        _log(f"EXIT sem convergencia estado={estado or 'none'} email={email or 'none'}")
         return resposta
 
     if not garantir_tag_estado_kit(email, estado):
+        _log(f"FAIL entrada estado={estado} email={email}")
         raise HTTPException(
             status_code=503,
             detail="recovery_state_entry_not_converged",
         )
 
     if not convergir_tags_kit(email, estado):
+        _log(f"FAIL convergencia estado={estado} email={email}")
         raise HTTPException(
             status_code=503,
             detail="recovery_state_not_converged",
         )
 
+    _log(f"EXIT sucesso estado={estado} email={email}")
     return resposta
